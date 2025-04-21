@@ -448,8 +448,14 @@ __global__ void allreduce_fusion_kernel_oneshot_lamport(AllReduceFusionParams pa
     int tot_access = index_helper.tot_access;
     float4 clear_vec = get_neg_zero();
     FusedOp<Pattern, DType> fused_op(params, access_id, access_id_in_token);
+    // if (threadIdx.x == 0 && blockIdx.x == 0){
+    //     printf("rank = %d,  tokens =  %d, allreduce_fusion_kernel_oneshot_lamport start\n", params.rank,
+    //     params.size/params.hidden_dim);
+    // }
+
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
     cudaGridDependencySynchronize();
+    cudaTriggerProgrammaticLaunchCompletion();
 #endif
     LamportComm<NRanks> comm(params.workspace, params.rank);
     int clear_access = comm.clear_size / kElemsPerAccess<DType>;
@@ -479,7 +485,9 @@ __global__ void allreduce_fusion_kernel_oneshot_lamport(AllReduceFusionParams pa
         // Clear comm buffer that previous kernel used
         reinterpret_cast<float4*>(comm.clear_buf)[idx] = clear_vec;
     }
-
+    // #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    // cudaTriggerProgrammaticLaunchCompletion();
+    // #endif
     for (int idx = access_id, tidx = token_id; idx < tot_access; idx += access_stride, tidx += token_stride)
     {
         fused_op.update(idx);
@@ -500,10 +508,12 @@ __global__ void allreduce_fusion_kernel_oneshot_lamport(AllReduceFusionParams pa
         float4 sum_val = allreduce_sum<DType, NRanks, Fp32Acc>(vals);
         fused_op(sum_val, tidx);
     }
+
     comm.update(params.size * NRanks);
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-    cudaTriggerProgrammaticLaunchCompletion();
-#endif
+    // if (threadIdx.x == 0 && blockIdx.x == 0){
+    //     printf("rank = %d,  tokens =  %d, allreduce_fusion_kernel_oneshot_lamport end\n", params.rank,
+    //     params.size/params.hidden_dim);
+    // }
 }
 
 template <AllReduceFusionPattern Pattern, typename DType, int NRanks, bool Fp32Acc>

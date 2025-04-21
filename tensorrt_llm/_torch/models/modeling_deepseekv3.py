@@ -317,10 +317,17 @@ class Deepseekv3Gate(BaseMoeRoutingMethod):
             is_thop=is_thop)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        logits = torch.ops.trtllm.cublas_mm(hidden_states,
-                                            self.weight.t(),
-                                            bias=None,
-                                            out_dtype=torch.float32)
+        min_latency_decode_tokens = 4
+        if hidden_states.size(0) == min_latency_decode_tokens:
+            logits = torch.ops.trtllm.router_gemm_op(hidden_states,
+                                                     self.weight.t(),
+                                                     bias=None,
+                                                     out_dtype=torch.float32)
+        else:
+            logits = torch.ops.trtllm.cublas_mm(hidden_states,
+                                                self.weight.t(),
+                                                bias=None,
+                                                out_dtype=torch.float32)
         return logits
 
     def load_weights(self, weights: List[Dict]):
