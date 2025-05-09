@@ -349,7 +349,6 @@ class DeepseekAllReduce(nn.Module):
         reduce_fusion_inputs: List[torch.Tensor],
         eps: float,
         fusion_op: AllReduceFusionOp,
-        trigger_completion_at_end: bool = True,
     ) -> Tuple[torch.Tensor, ...]:
         """
         hidden_states: hidden_states of the model
@@ -358,7 +357,6 @@ class DeepseekAllReduce(nn.Module):
         fusion_op: AllReduceFusionOp Type, currently supports RMSNorm:
           * RESIDUAL_RMS_NORM: allreduce + residual + Norm
           * RESIDUAL_RMS_NORM_QUANT_NVFP4: allreduce + residual + Norm + fp4 quantization
-        trigger_completion_at_end: whether to trigger completion at the end of the allreduce
         output:
           * [hidden_states, residual] if using RESIDUAL_RMS_NORM fusion_op
           * [act_fp4, act_sf, residual] if using RESIDUAL_RMS_NORM_QUANT_NVFP4 fusion_op
@@ -372,7 +370,6 @@ class DeepseekAllReduce(nn.Module):
             nranks=self.mapping.tp_size,
             eps=eps,
             fusion_op=fusion_op,
-            trigger_completion_at_end=trigger_completion_at_end,
         )
 
         if len(output) == 0:
