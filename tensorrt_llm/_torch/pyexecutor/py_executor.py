@@ -1534,17 +1534,44 @@ class PyExecutor:
                 else:
                     self.adp_ctx_waiting_iters += 1
                     context_requests = []
+                    trigger_rebalance = True
                     if self.adp_ctx_waiting_iters >= 500:
                         self.adp_ctx_waiting_iters = 0
                         context_requests = scheduler_output.context_requests
+                        trigger_rebalance = False
 
             if all_ranks_have_free_ctx_slots and all_ranks_have_ctx_requests and all_ranks_have_gen_requests:
-                trigger_rebalance = True
                 if self.adp_ctx_batching_wait_iters <= 10:
                     self.adp_ctx_batching_wait_iters += 1
                     context_requests = []
+                    trigger_rebalance = True
                 else:
                     self.adp_ctx_batching_wait_iters = 0
+
+        if trigger_rebalance:   # for context tokens
+            num_scheduled_tokens = sum([
+                len(req.get_tokens(0)) for req in context_requests
+            ]) + num_scheduled_generation_requests
+
+            responses_list = self.dist.tp_allgather([
+                len(context_requests),
+                num_scheduled_tokens
+            ])
+            all_ranks_num_scheduled_context_requests = [
+                response[0] for response in responses_list
+            ]
+            all_ranks_num_scheduled_tokens = [
+                response[1] for response in responses_list
+            ]
+
+        logger.info(
+            f"all rank input tokens",
+            f"iter = {self.model_engine.iter_counter}, "
+            f"all_ranks_num_scheduled_tokens: {all_ranks_num_scheduled_tokens}",
+            # f"num_scheduled_requests: {self.num_scheduled_requests}, "
+            f"all_ranks_num_scheduled_generation_requests: {all_ranks_num_scheduled_generation_requests}",
+            f"all_ranks_num_scheduled_context_requests: {all_ranks_num_scheduled_context_requests}",
+        )
 
         scheduled_requests.context_requests = context_requests
         scheduled_requests.generation_requests = scheduler_output.generation_requests
