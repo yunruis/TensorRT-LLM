@@ -1876,7 +1876,7 @@ class TorchLlmArgs(BaseLlmArgs):
             load_format=self.load_format,
             enable_min_latency=self.enable_min_latency,
             stream_interval=self.stream_interval,
-            use_attention_dp_config=bool(self.attention_dp_config is not None),
+            use_attention_dp_config=bool(self.attention_dp_config is not None and self.attention_dp_config.enable_balance),
             attention_dp_time_out_iters=self.attention_dp_config.timeout_iters
             if self.attention_dp_config is not None else
             AttentionDpConfig.model_fields['timeout_iters'].default,
