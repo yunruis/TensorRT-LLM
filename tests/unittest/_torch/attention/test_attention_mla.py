@@ -39,6 +39,7 @@ def calculate_ref_result_ctx(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                              qk_rope_head_dim: int, v_head_dim: int,
                              sequence_lengths: List[int], q_scaling: float):
     """
+    k_pe should be part of k: k_pe = k[..., -qk_rope_head_dim:]
     use standard attention to calculate the reference result by iterating over each request
     q shape: (total_tokens, num_heads * qk_head_dim)
     k shape: (total_tokens, num_kv_heads * qk_head_dim)
@@ -327,7 +328,8 @@ context_sequence_lengths = [
 ]
 # Use MTP by default if seqlen_q > 1.
 generation_seq_len_q = [1, 4]
-num_generation_steps = [10]
+# num_generation_steps = [10]
+num_generation_steps = [10, 2, 3]
 
 kv_cache_dtype_list = [torch.bfloat16]
 if torch.cuda.get_device_capability() in [(8, 9), (9, 0), (10, 0), (12, 0)]:
@@ -422,39 +424,49 @@ def _run_test_for_backend(backend_name, num_heads, num_kv_heads, num_layers,
                 dtype=dtype,
                 device=device,
             ).uniform_(-1, 1) for ctx_len in context_sequence_lengths
-        ])
+        ])  # [total_ctx_len, kv_lora_rank(512)]
         ctx_k_pe = torch.cat([
             torch.empty(
                 [ctx_len, qk_rope_head_dim],
                 dtype=dtype,
                 device=device,
             ).uniform_(-1, 1) for ctx_len in context_sequence_lengths
-        ])
+        ])  # [total_ctx_len, qk_rope_head_dim(64)]
         ctx_q = torch.cat([
             torch.empty(
                 [ctx_len, num_heads * qk_head_dim],
                 dtype=dtype,
                 device=device,
             ).uniform_(-1, 1) for ctx_len in context_sequence_lengths
-        ])
-        ctx_kv = torch.cat([
-            torch.empty(
-                [ctx_len, num_kv_heads * (qk_nope_head_dim + v_head_dim)],
-                dtype=dtype,
-                device=device,
-            ).uniform_(-1, 1) for ctx_len in context_sequence_lengths
-        ])
+        ])  # [total_ctx_len, num_heads(128) * qk_head_dim(128 + 64 = 192)]
+        ctx_kv = torch.cat(
+            [
+                torch.empty(
+                    [ctx_len, num_kv_heads * (qk_nope_head_dim + v_head_dim)],
+                    dtype=dtype,
+                    device=device,
+                ).uniform_(-1, 1) for ctx_len in context_sequence_lengths
+            ]
+        )  # [total_ctx_len, num_kv_heads(128) * (qk_nope_head_dim(128) + v_head_dim(128))]
         # ctx_v.stride(0) == num_kv_heads * (qk_nope_head_dim + v_head_dim)
         ctx_k_nope, ctx_v = ctx_kv.split(
             [num_kv_heads * qk_nope_head_dim, num_kv_heads * v_head_dim],
-            dim=-1)
-        ctx_k_nope = ctx_k_nope.view(-1, num_kv_heads, qk_nope_head_dim)
-        ctx_k = torch.cat([
-            ctx_k_nope,
-            ctx_k_pe.view(-1, 1, qk_rope_head_dim).expand(-1, num_kv_heads, -1)
-        ],
-                          dim=-1)
-        ctx_k = ctx_k.view(-1, num_kv_heads * qk_head_dim)
+            dim=-1
+        )  # [total_ctx_len, num_kv_heads * (qk_nope_head_dim + v_head_dim)=128 * 128]
+        ctx_k_nope = ctx_k_nope.view(
+            -1, num_kv_heads, qk_nope_head_dim
+        )  # [total_ctx_len, num_kv_heads(128), qk_nope_head_dim(128)]
+        ctx_k = torch.cat(
+            [
+                ctx_k_nope,
+                ctx_k_pe.view(-1, 1, qk_rope_head_dim).expand(
+                    -1, num_kv_heads, -1)
+            ],
+            dim=-1
+        )  # [total_ctx_len, num_kv_heads(128), (qk_nope_head_dim(128) + qk_rope_head_dim(64))]
+        ctx_k = ctx_k.view(
+            -1, num_kv_heads * qk_head_dim
+        )  # [total_ctx_len, num_kv_heads(128) * qk_head_dim(128 + 64 = 192)]
 
         gen_compressed_kv_list = [
             torch.cat([
@@ -464,7 +476,7 @@ def _run_test_for_backend(backend_name, num_heads, num_kv_heads, num_layers,
                     device=device,
                 ).uniform_(-1, 1) for _ in context_sequence_lengths
             ]) for _ in range(num_generation_steps)
-        ]
+        ]  # [3, 512] * 10
         gen_k_pe_list = [
             torch.cat([
                 torch.empty(
@@ -473,7 +485,7 @@ def _run_test_for_backend(backend_name, num_heads, num_kv_heads, num_layers,
                     device=device,
                 ).uniform_(-1, 1) for _ in context_sequence_lengths
             ]) for _ in range(num_generation_steps)
-        ]
+        ]  # [3, 64] * 10
         gen_fused_q_list = [
             torch.cat([
                 torch.empty(
@@ -485,7 +497,7 @@ def _run_test_for_backend(backend_name, num_heads, num_kv_heads, num_layers,
                     device=device,
                 ).uniform_(-1, 1) for _ in context_sequence_lengths
             ]) for _ in range(num_generation_steps)
-        ]
+        ]  # [3, 128 * (576 = 512 + 64)] * 10
         gen_q_pe_list = [
             torch.cat([
                 torch.empty(
@@ -494,7 +506,7 @@ def _run_test_for_backend(backend_name, num_heads, num_kv_heads, num_layers,
                     device=device,
                 ).uniform_(-1, 1) for _ in context_sequence_lengths
             ]) for _ in range(num_generation_steps)
-        ]
+        ]  # [3, 128, 64] * 10
 
         inputs = {
             "ctx_compressed_kv": ctx_compressed_kv,
@@ -584,6 +596,7 @@ def _run_test_for_backend(backend_name, num_heads, num_kv_heads, num_layers,
         ) for layer_idx in range(num_layers)
     ]
 
+    print("gen_layers: ", gen_layers)
     # NOTE: set up metadata, refer to tensorrt_llm/_torch/pyexecutor/model_engine.py
     # all layers share the same metadata
     mapping = Mapping(world_size=1, tp_size=1, rank=0)
@@ -609,7 +622,7 @@ def _run_test_for_backend(backend_name, num_heads, num_kv_heads, num_layers,
         dtype=str_dtype_to_binding(torch_dtype_to_str(kv_cache_dtype)),
     )
     request_list = []
-    for req_id, ctx_len in enumerate(context_sequence_lengths):
+    for req_id, ctx_len in enumerate(context_sequence_lengths):  # [10, 12, 5]
         req = LlmRequest(
             request_id=req_id,
             max_new_tokens=num_generation_steps + 1,
@@ -636,12 +649,13 @@ def _run_test_for_backend(backend_name, num_heads, num_kv_heads, num_layers,
         ),
         mapping=mapping,
     )
+    print(f"Context attn_metadata: {attn_metadata}")
     attn_metadata.prepare()
 
     # run forward for each step and each layer
     latent_cache_ref_all_list = [None for _ in range(num_layers)]
     for step in range(num_generation_steps + 1):
-        if step > 0:
+        if step > 0:  # generation step
             for req_id in range(len(context_sequence_lengths)):
                 for _ in range(generation_seq_len_q):
                     kv_cache_manager.impl.add_token(req_id)
@@ -670,15 +684,19 @@ def _run_test_for_backend(backend_name, num_heads, num_kv_heads, num_layers,
             print(
                 f"--------------------------------step {step} layer {layer_idx} start--------------------------------"
             )
-            if step == 0:
+            if step == 0:  # context step
                 q = inputs_per_layer[layer_idx]["ctx_q"]
                 k = inputs_per_layer[layer_idx]["ctx_k"]
                 v = inputs_per_layer[layer_idx]["ctx_v"]
                 compressed_kv = inputs_per_layer[layer_idx]["ctx_compressed_kv"]
-                k_pe = inputs_per_layer[layer_idx]["ctx_k_pe"]
-                latent_cache = torch.cat([compressed_kv, k_pe], dim=-1)
+                k_pe = inputs_per_layer[layer_idx]["ctx_k_pe"]  # [27, 64]
+                latent_cache = torch.cat([compressed_kv, k_pe],
+                                         dim=-1)  # [27, 576 = 512 + 64]
                 # q/k will be modified in the forward pass, so we need to clone them
                 # we should not clone v because we need to keep the stride of v
+                print(
+                    f"before forward, q: {q.shape}, k: {k.shape}, v: {v.shape}, compressed_kv: {compressed_kv.shape}, k_pe: {k_pe.shape}, latent_cache: {latent_cache.shape}"
+                )
                 result = ctx_layers[layer_idx].forward(
                     q.clone(),
                     k.clone(),
@@ -708,11 +726,23 @@ def _run_test_for_backend(backend_name, num_heads, num_kv_heads, num_layers,
             else:
                 fused_q = inputs_per_layer[layer_idx]["gen_fused_q_list"][step -
                                                                           1]
-                q_pe = inputs_per_layer[layer_idx]["gen_q_pe_list"][step - 1]
+                # q_pe = inputs_per_layer[layer_idx]["gen_q_pe_list"][step - 1]
+                q_pe = fused_q.view(
+                    -1, num_heads, kv_lora_rank +
+                    qk_rope_head_dim)[..., -qk_rope_head_dim:].contiguous()
                 compressed_kv = inputs_per_layer[layer_idx][
                     "gen_compressed_kv_list"][step - 1]
                 k_pe = inputs_per_layer[layer_idx]["gen_k_pe_list"][step - 1]
                 latent_cache = torch.cat([compressed_kv, k_pe], dim=-1)
+                print(f"Generation attn_metadata: {attn_metadata}")
+                print(
+                    f"fused_q.shape: {fused_q.shape}, latent_cache.shape: {latent_cache.shape}, q_pe.shape: {q_pe.shape}"
+                )
+
+                gen_layers[layer_idx].mla_rope_generation(
+                    fused_q, q_pe, latent_cache, attn_metadata)
+                torch.cuda.synchronize()
+
                 result = gen_layers[layer_idx].forward(
                     fused_q,
                     None,

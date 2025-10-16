@@ -139,6 +139,23 @@ class TrtllmAttentionWrapper:
         self.kwargs = {}
         self.kwargs.update(kwargs)
 
+        # Initialize attributes that will be set in plan()
+        # self.workspace = None
+        self.workspace = torch.empty([1], dtype=torch.int8, device='cuda')
+        # self.layer_idx = 0
+        # self.tokens_per_block = 0
+        # self.max_num_requests = 0
+        # self.max_context_length = 0
+        self.attention_window_size = 0
+        # self.sink_token_length = 0
+        # self.beam_width = 1
+        self.cu_q_seqlens = None
+        self.cu_kv_seqlens = None
+        self.fmha_tile_counter = None
+        self.mla_bmm1_scale = None
+        self.mla_bmm2_scale = None
+        self.quant_q_buffer = None
+
     def update_quant_config(self, quant_config: Optional[QuantConfig] = None):
         quant_config = quant_config or QuantConfig()
         self.quant_mode = int(quant_config.layer_quant_mode)
@@ -242,7 +259,8 @@ class TrtllmAttentionWrapper:
         self.host_kv_cache_block_offsets = host_kv_cache_block_offsets
         self.host_kv_cache_pool_pointers = host_kv_cache_pool_pointers
         self.host_kv_cache_pool_mapping = host_kv_cache_pool_mapping
-        self.workspace = workspace
+        self.workspace = workspace if workspace is not None else torch.empty(
+            [1], dtype=torch.int8, device='cuda')
         self.cache_indirection = cache_indirection
         self.kv_scale_orig_quant = kv_scale_orig_quant if kv_scales_sf_inv is None else kv_scales_sf_inv
         self.kv_scale_quant_orig = kv_scale_quant_orig if kv_scales_sf is None else kv_scales_sf
@@ -416,6 +434,188 @@ class TrtllmAttentionWrapper:
             self.spec_decoding_generation_lengths,
             self.spec_decoding_position_offsets, self.spec_decoding_packed_mask
         ]
+
+        # Print input parameters for thop.attention debugging
+        print("===== THOP.ATTENTION INPUT PARAMETERS =====")
+
+        # Basic tensor parameters
+        print(f"q: {q.shape if q is not None else 'None'}")
+        print(f"k: {k.shape if k is not None else 'None'}")
+        print(f"v: {v.shape if v is not None else 'None'}")
+        print(f"output: {output.shape if output is not None else 'None'}")
+        print(
+            f"output_sf: {output_sf.shape if output_sf is not None else 'None'}"
+        )
+        print(f"out_dtype: {out_dtype}")
+        print(
+            f"workspace: {self.workspace.shape if self.workspace is not None else 'None'}"
+        )
+
+        # Sequence and length tensors
+        if self.sequence_length is not None:
+            print(
+                f"sequence_length: shape={self.sequence_length.shape}, value={self.sequence_length}"
+            )
+        else:
+            print("sequence_length: None")
+
+        if self.host_past_key_value_lengths is not None:
+            print(
+                f"host_past_key_value_lengths: shape={self.host_past_key_value_lengths.shape}, value={self.host_past_key_value_lengths}"
+            )
+        else:
+            print("host_past_key_value_lengths: None")
+
+        if self.host_total_kv_lens is not None:
+            print(
+                f"host_total_kv_lens: shape={self.host_total_kv_lens.shape}, value={self.host_total_kv_lens}"
+            )
+        else:
+            print("host_total_kv_lens: None")
+
+        if self.context_lengths is not None:
+            print(
+                f"context_lengths: shape={self.context_lengths.shape}, value={self.context_lengths}"
+            )
+        else:
+            print("context_lengths: None")
+
+        if self.host_context_lengths is not None:
+            print(
+                f"host_context_lengths: shape={self.host_context_lengths.shape}, value={self.host_context_lengths}"
+            )
+        else:
+            print("host_context_lengths: None")
+
+        if self.host_request_types is not None:
+            print(
+                f"host_request_types: shape={self.host_request_types.shape}, value={self.host_request_types}"
+            )
+        else:
+            print("host_request_types: None")
+
+        # Cache-related tensors
+        print(
+            f"kv_cache_block_offsets: {self.kv_cache_block_offsets.shape if self.kv_cache_block_offsets is not None else 'None'}"
+        )
+        print(
+            f"host_kv_cache_block_offsets: {self.host_kv_cache_block_offsets.shape if self.host_kv_cache_block_offsets is not None else 'None'}, value={self.host_kv_cache_block_offsets}"
+        )
+
+        if self.host_kv_cache_pool_pointers is not None:
+            print(
+                f"host_kv_cache_pool_pointers: shape={self.host_kv_cache_pool_pointers.shape}, value={self.host_kv_cache_pool_pointers}"
+            )
+        else:
+            print("host_kv_cache_pool_pointers: None")
+
+        if self.host_kv_cache_pool_mapping is not None:
+            print(
+                f"host_kv_cache_pool_mapping: shape={self.host_kv_cache_pool_mapping.shape}, value={self.host_kv_cache_pool_mapping}"
+            )
+        else:
+            print("host_kv_cache_pool_mapping: None")
+
+        print(
+            f"cache_indirection: {self.cache_indirection.shape if self.cache_indirection is not None else 'None'}"
+        )
+
+        # Quantization tensors
+        print(
+            f"kv_scale_orig_quant: {self.kv_scale_orig_quant.shape if self.kv_scale_orig_quant is not None else 'None'}"
+        )
+        print(
+            f"kv_scale_quant_orig: {self.kv_scale_quant_orig.shape if self.kv_scale_quant_orig is not None else 'None'}"
+        )
+        out_scale = self.out_scale_sf if self.use_nvfp4_output else self.out_scale
+        print(
+            f"out_scale: {out_scale.shape if out_scale is not None else 'None'}"
+        )
+
+        # Rotary embedding tensors
+        print(
+            f"rotary_inv_freq: {self.rotary_inv_freq.shape if self.rotary_inv_freq is not None else 'None'}"
+        )
+        print(
+            f"rotary_cos_sin: {self.rotary_cos_sin.shape if self.rotary_cos_sin is not None else 'None'}"
+        )
+
+        # Additional tensors
+        print(
+            f"latent_cache: {self.latent_cache.shape if self.latent_cache is not None else 'None'}"
+        )
+        print(f"q_pe: {self.q_pe.shape if self.q_pe is not None else 'None'}")
+        print(
+            f"block_ids_per_seq: {self.block_ids_per_seq.shape if self.block_ids_per_seq is not None else 'None'}"
+        )
+        print(
+            f"attention_sinks: {self.attention_sinks.shape if self.attention_sinks is not None else 'None'}"
+        )
+
+        # Boolean parameters
+        print(f"is_fused_qkv: {is_fused_qkv}")
+        print(f"update_kv_cache: {update_kv_cache}")
+
+        # Integer parameters
+        print(f"predicted_tokens_per_seq: {self.predicted_tokens_per_seq}")
+        print(f"layer_idx: {self.layer_idx}")
+        print(f"num_heads: {self.num_heads}")
+        print(f"num_kv_heads: {self.num_kv_heads}")
+        print(f"head_size: {self.head_size}")  # 572,192
+        print(f"tokens_per_block: {self.tokens_per_block}")
+        print(f"max_num_requests: {self.max_num_requests}")
+        print(f"max_context_length: {self.max_context_length}")
+        print(f"attention_window_size: {self.attention_window_size}")
+        print(f"sink_token_length: {self.sink_token_length}")
+        print(f"beam_width: {self.beam_width}")
+        print(f"mask_type: {int(mask_type)}")
+        print(f"quant_mode: {self.quant_mode}")
+
+        # Float parameters
+        print(f"q_scaling: {self.q_scaling}")
+
+        # Rotary embedding parameters
+        print(f"position_embedding_type: {self.position_embedding_type}")
+        print(f"rotary_embedding_dim: {self.rotary_embedding_dim}")
+        print(f"rotary_embedding_base: {self.rotary_embedding_base}")
+        print(
+            f"rotary_embedding_scale_type: {self.rotary_embedding_scale_type}")
+        print(f"rotary_embedding_scales: {rotary_embedding_scales}")
+        print(
+            f"rotary_embedding_max_position_info: {rotary_embedding_max_position_info}"
+        )
+
+        # Additional boolean parameters
+        print(f"use_paged_context_fmha: {self.use_paged_context_fmha}")
+        print(f"attention_input_type: {self.attention_input_type}")
+        print(f"is_mla_enable: {self.is_mla_enable}")
+
+        # MLA parameters
+        print(f"q_lora_rank: {self.q_lora_rank}")
+        print(f"kv_lora_rank: {self.kv_lora_rank}")
+        print(f"qk_nope_head_dim: {self.qk_nope_head_dim}")
+        print(f"qk_rope_head_dim: {self.qk_rope_head_dim}")
+        print(f"v_head_dim: {self.v_head_dim}")
+
+        # MRoPE tensors
+        print(
+            f"mrope_rotary_cos_sin: {self.mrope_rotary_cos_sin.shape if self.mrope_rotary_cos_sin is not None else 'None'}"
+        )
+        print(
+            f"mrope_position_deltas: {self.mrope_position_deltas.shape if self.mrope_position_deltas is not None else 'None'}"
+        )
+
+        # Additional parameters
+        print(f"attention_chunk_size: {self.attention_chunk_size}")
+        print(
+            f"softmax_stats_tensor: {self.softmax_stats_tensor.shape if self.softmax_stats_tensor is not None else 'None'}"
+        )
+        print(f"spec_decoding_bool_params: {spec_decoding_bool_params}")
+        print(
+            f"spec_decoding_tensor_params shapes: {[t.shape if t is not None else 'None' for t in spec_decoding_tensor_params]}"
+        )
+
+        print("============================================")
 
         thop.attention(
             q,
@@ -1177,6 +1377,11 @@ class TrtllmAttention(AttentionBackend[TrtllmAttentionMetadata]):
             metadata,
             TrtllmAttentionMetadata,
         )
+        print("[trtllm forward]")
+        print(f"[trtllm forward] metadata.workspace: {metadata.workspace}")
+        print(
+            f"[trtllm forward] self.wrapper.workspace: {self.wrapper.workspace}"
+        )
         assert not metadata.is_cross, "TRT-LLM Attention does not support cross attention yet."
 
         use_paged_context_fmha = (
@@ -1199,6 +1404,7 @@ class TrtllmAttention(AttentionBackend[TrtllmAttentionMetadata]):
                 use_paged_context_fmha=use_paged_context_fmha,
                 is_mla_enable=self.is_mla_enable,
             )
+        # read only
         self.wrapper.plan(
             layer_idx=self.get_local_layer_idx(metadata),
             tokens_per_block=metadata.tokens_per_block,
@@ -1220,7 +1426,8 @@ class TrtllmAttention(AttentionBackend[TrtllmAttentionMetadata]):
             host_kv_cache_pool_pointers=metadata.host_kv_cache_pool_pointers,
             host_kv_cache_pool_mapping=metadata.host_kv_cache_pool_mapping,
             block_ids_per_seq=metadata.block_ids_per_seq,
-            workspace=None,
+            workspace=metadata.workspace
+            if metadata.workspace is not None else self.wrapper.workspace,
             cache_indirection=metadata.cache_indirection,
             kv_scale_orig_quant=self.kv_scale_orig_quant,
             kv_scale_quant_orig=self.kv_scale_quant_orig,
@@ -1244,6 +1451,9 @@ class TrtllmAttention(AttentionBackend[TrtllmAttentionMetadata]):
             spec_decoding_generation_lengths=metadata.
             spec_decoding_generation_lengths,
             attention_sinks=attention_sinks,
+        )
+        print(
+            f"[trtllm forward] After plan(), self.wrapper.workspace: {self.wrapper.workspace}"
         )
         out_dtype = None
         if out_scale is not None:
@@ -1456,3 +1666,132 @@ class TrtllmAttention(AttentionBackend[TrtllmAttentionMetadata]):
             self.num_heads,
             self.mla_params.v_head_dim,
         )
+
+    def mla_rope_generation(
+        self,
+        fused_q: torch.
+        Tensor,  # [tokens, num_heads, kv_lora_rank + qk_rope_head_dim]
+        q_pe: torch.Tensor,  # [tokens, num_heads, qk_rope_head_dim]
+        latent_cache: torch.Tensor,  # [tokens, kv_lora_rank + qk_rope_head_dim]
+        metadata: TrtllmAttentionMetadata,
+        out_scale: Optional[torch.Tensor] = None,
+    ) -> None:
+
+        assert self.is_mla_enable and self.mla_params is not None
+        assert metadata.kv_cache_manager is not None
+        sink_token_length = 0
+
+        fused_q.size(0)
+        metadata.kv_lens_cuda_runtime.size(0)
+
+        # 打印mla_rope_generation的实参，对张量只打印shape
+        print("[mla_rope_generation] arg 1 - fused_q.shape:",
+              tuple(fused_q.shape))
+        print("[mla_rope_generation] arg 2 - q_pe.shape:", tuple(q_pe.shape))
+        print("[mla_rope_generation] arg 3 - latent_cache.shape:",
+              tuple(latent_cache.shape))
+        if self.wrapper.rotary_cos_sin is not None:
+            print("[mla_rope_generation] arg 4 - rotary_cos_sin.shape:",
+                  tuple(self.wrapper.rotary_cos_sin.shape))
+        else:
+            print("[mla_rope_generation] arg 4 - rotary_cos_sin: None")
+        print("[mla_rope_generation] arg 5 - workspace:",
+              self.wrapper.workspace)
+        print("[mla_rope_generation] arg 6 - kv_lens_cuda_runtime:",
+              metadata.kv_lens_cuda_runtime)
+        print("[mla_rope_generation] arg 7 - kv_lens_runtime:",
+              metadata.kv_lens_runtime)
+        print("[mla_rope_generation] arg 8 - prompt_lens_cpu_runtime:",
+              metadata.prompt_lens_cpu_runtime)
+        print("[mla_rope_generation] arg 9 - kv_cache_block_offsets:",
+              metadata.kv_cache_block_offsets)
+        print("[mla_rope_generation] arg 10 - host_kv_cache_block_offsets:",
+              metadata.host_kv_cache_block_offsets)
+        print("[mla_rope_generation] arg 11 - kv_cache_pool_pointers:",
+              metadata.kv_cache_manager.kv_cache_pool_pointers)
+        print("[mla_rope_generation] arg 12 - kv_cache_pool_mapping:",
+              metadata.kv_cache_manager.kv_cache_pool_mapping)
+        print("[mla_rope_generation] arg 13 - kv_scale_orig_quant:",
+              self.kv_scale_orig_quant)
+        print("[mla_rope_generation] arg 14 - kv_scale_quant_orig:",
+              self.kv_scale_quant_orig)
+        print("[mla_rope_generation] arg 15 - out_scale:", out_scale)
+        print("[mla_rope_generation] arg 16 - block_ids_per_seq:",
+              metadata.block_ids_per_seq)
+        print("[mla_rope_generation] arg 17 - predicted_tokens_per_seq:",
+              self.wrapper.predicted_tokens_per_seq)
+        print("[mla_rope_generation] arg 18 - local_layer_idx:",
+              self.get_local_layer_idx(metadata))
+        print("[mla_rope_generation] arg 19 - num_heads:",
+              self.wrapper.num_heads)
+        print("[mla_rope_generation] arg 20 - num_kv_heads:",
+              self.wrapper.num_kv_heads)
+        print("[mla_rope_generation] arg 21 - head_size:",
+              self.wrapper.head_size)
+        print("[mla_rope_generation] arg 22 - tokens_per_block:",
+              metadata.kv_cache_manager.tokens_per_block)
+        print("[mla_rope_generation] arg 23 - attention_window_size:",
+              self.wrapper.attention_window_size or metadata.max_seq_len)
+        print("[mla_rope_generation] arg 24 - sink_token_length:",
+              sink_token_length)
+        print("[mla_rope_generation] arg 25 - beam_width:", metadata.beam_width)
+        print("[mla_rope_generation] arg 26 - quant_mode:",
+              self.wrapper.quant_mode)
+        print("[mla_rope_generation] arg 27 - q_scaling:",
+              self.wrapper.q_scaling)
+        print("[mla_rope_generation] arg 28 - q_lora_rank:",
+              self.wrapper.q_lora_rank)
+        print("[mla_rope_generation] arg 29 - kv_lora_rank:",
+              self.wrapper.kv_lora_rank)
+        print("[mla_rope_generation] arg 30 - qk_nope_head_dim:",
+              self.wrapper.qk_nope_head_dim)
+        print("[mla_rope_generation] arg 31 - qk_rope_head_dim:",
+              self.wrapper.qk_rope_head_dim)
+        print("[mla_rope_generation] arg 32 - v_head_dim:",
+              self.wrapper.v_head_dim)
+
+        torch.ops.trtllm.mla_rope_generation(
+            fused_q,
+            q_pe,
+            latent_cache,
+            self.wrapper.rotary_cos_sin,
+            self.wrapper.workspace,
+            metadata.kv_lens_cuda_runtime,  # sequence_length
+            metadata.kv_lens_runtime,  # host_past_key_value_lengths
+            metadata.prompt_lens_cpu_runtime,  # host_context_lengths, 应该包括ctx？
+            metadata.kv_cache_block_offsets,
+            metadata.host_kv_cache_block_offsets,
+            metadata.kv_cache_manager.kv_cache_pool_pointers,
+            metadata.kv_cache_manager.kv_cache_pool_mapping,
+            self.kv_scale_orig_quant,
+            self.kv_scale_quant_orig,
+            out_scale,
+            metadata.block_ids_per_seq,
+            self.wrapper.predicted_tokens_per_seq,
+            self.get_local_layer_idx(metadata),
+            self.wrapper.num_heads,  # 128
+            self.wrapper.num_kv_heads,  # 1
+            self.wrapper.head_size,  # 572,192
+            metadata.kv_cache_manager.tokens_per_block,
+            self.wrapper.attention_window_size or metadata.max_seq_len,
+            sink_token_length,
+            metadata.beam_width,
+            self.wrapper.quant_mode,
+            self.wrapper.q_scaling,
+            self.wrapper.q_lora_rank,
+            self.wrapper.kv_lora_rank,
+            self.wrapper.qk_nope_head_dim,
+            self.wrapper.qk_rope_head_dim,
+            self.wrapper.v_head_dim,
+        )
+        print(
+            f"[mla_rope_generation] After mla_rope_generation(), self.wrapper.workspace: {self.wrapper.workspace}"
+        )
+
+        # Sync workspace back to metadata if needed
+        if metadata.workspace is not None and self.wrapper.workspace is not None:
+            # If metadata has its own workspace tensor, update it with the wrapper's workspace
+            metadata.workspace = self.wrapper.workspace
+            print(
+                f"[mla_rope_generation] Synced workspace back to metadata.workspace: {metadata.workspace}"
+            )

@@ -998,7 +998,7 @@ class MLA(nn.Module):
             0] == num_tokens, f"Expect q.shape[0] to be {num_tokens}, but got {q.shape[0]}"
 
         assert output is not None, "output must be provided"
-
+        print("[forward_impl] num_contexts: ", num_contexts)
         if num_contexts > 0:
             q_ctx = q[:num_ctx_tokens, ...]
             compressed_kv_ctx = compressed_kv[:num_ctx_tokens, ...]
@@ -1016,8 +1016,9 @@ class MLA(nn.Module):
                 output[:num_ctx_tokens, :],
                 latent_cache_ctx,
             )
-
+        print("[forward_impl] num_generations: ", num_generations)
         if num_generations > 0:
+            exit(0)
             q_gen = q[num_ctx_tokens:, ...]
             compressed_kv_gen = compressed_kv[num_ctx_tokens:, ...]
             k_pe_gen = k_pe[num_ctx_tokens:, ...]
@@ -1146,7 +1147,7 @@ class MLA(nn.Module):
 
     def forward_context_with_chunked_prefill(
         self,
-        q: torch.Tensor,
+        q: torch.Tensor,  # [chunk_size, num_heads, qk_head_dim]
         compressed_kv: torch.Tensor,
         latent_cache: torch.
         Tensor,  # compressed_kv + k_pe [context_tokens, 1, lora_size + rope_size]
@@ -1379,8 +1380,13 @@ class MLA(nn.Module):
             raise NotImplementedError(
                 f"Missing bmm impl for dtype: {self.k_b_proj_trans.dtype}.")
 
-        if self.apply_rotary_emb:
-            fused_q[..., self.kv_lora_rank:] = q_pe
+        if True:
+            print("[forward_generation] apply_rope_generation")
+            self.mqa.mla_rope_generation(fused_q, q_pe, latent_cache,
+                                         attn_metadata)
+
+        # if self.apply_rotary_emb:
+        #     fused_q[..., self.kv_lora_rank:] = q_pe
         fused_q = fused_q.view([
             num_tokens,
             self.num_heads * (self.kv_lora_rank + self.qk_rope_head_dim)
@@ -1437,7 +1443,6 @@ class MLA(nn.Module):
         attn_metadata: AttentionMetadata,
         all_reduce_params: Optional[AllReduceParams] = None,
     ) -> torch.Tensor:
-
         attn_output = self.create_output(hidden_states)
         if self.register_to_config:
             torch.ops.trtllm.mla_custom_op_inplace(hidden_states, position_ids,

@@ -976,15 +976,16 @@ int AttentionOp::mlaGeneration(
     size_t const quant_q_buffer_size = mFP8GenerationMLA
         ? params.acc_q_len * size_t(mNumHeads * (mMLAParams.kv_lora_rank + mMLAParams.qk_rope_head_dim))
         : 0;
-    int* cu_q_seqlens = reinterpret_cast<int*>(nextWorkspacePtr(workspace_byte_ptr, offset, cu_seqlens_size));
-    int* cu_kv_seqlens = reinterpret_cast<int*>(nextWorkspacePtr(workspace_byte_ptr, offset, cu_seqlens_size));
+    int* cu_q_seqlens = reinterpret_cast<int*>(nextWorkspacePtr(workspace_byte_ptr, offset, cu_seqlens_size)); // [bs+1]
+    int* cu_kv_seqlens
+        = reinterpret_cast<int*>(nextWorkspacePtr(workspace_byte_ptr, offset, cu_seqlens_size));               // [bs+1]
     uint32_t* fmha_tile_counter_ptr
-        = reinterpret_cast<uint32_t*>(nextWorkspacePtr(workspace_byte_ptr, offset, fmha_scheduler_counter));
+        = reinterpret_cast<uint32_t*>(nextWorkspacePtr(workspace_byte_ptr, offset, fmha_scheduler_counter));   // [1]
     float* mla_bmm1_scale_ptr
-        = reinterpret_cast<float*>(nextWorkspacePtr(workspace_byte_ptr, offset, mla_bmm1_scale_size));
-    float* mla_bmm2_scale_ptr
+        = reinterpret_cast<float*>(nextWorkspacePtr(workspace_byte_ptr, offset, mla_bmm1_scale_size));         // [2]
+    float* mla_bmm2_scale_ptr                                                                                  // [1]
         = reinterpret_cast<float*>(nextWorkspacePtr(workspace_byte_ptr, offset, mla_bmm2_scale_size));
-    void* quant_q_buffer_ptr
+    void* quant_q_buffer_ptr // [total_s_len * num_heads * (kv_lora_rank + qk_rope_head_dim)]
         = reinterpret_cast<__nv_fp8_e4m3*>(nextWorkspacePtr(workspace_byte_ptr, offset, quant_q_buffer_size));
     void* scratch_ptr = nextWorkspacePtr(workspace_byte_ptr, offset);
 
@@ -1003,8 +1004,8 @@ int AttentionOp::mlaGeneration(
     params.host_bmm1_scale
         = 1 / (mQScaling * sqrt((float) (mMLAParams.qk_nope_head_dim + mMLAParams.qk_rope_head_dim)));
 
-    invokeMLARopeGeneration<T>(params, kv_cache_buffer, stream);
-    sync_check_cuda_error(stream);
+    // invokeMLARopeGeneration<T>(params, kv_cache_buffer, stream);
+    // sync_check_cuda_error(stream);
 
     if (generation_params.runtime_perf_knobs)
     {
@@ -1596,7 +1597,7 @@ int AttentionOp::enqueueContext(EnqueueContextParams<T> const& params, cudaStrea
     // 1. only apply to self attention. If want fused multi-head cross attention, FMHCA kernels and runner is needed
     // 2. doesn't apply to MHA with relative attention bias, i.e. softmax(QK + bias) * V
     // We update mEnableContextFMHA in constructor to check these conditions
-    if (mEnableContextFMHA)
+    if (mEnableContextFMHA) // fused
     {
         // do all-to-all for params.attention_input, need to split on kv head
         // [token_num // cp_size, kv_heads, head_size] -> [token_num, kv_heads // cp_size, head_size]

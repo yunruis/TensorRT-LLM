@@ -137,6 +137,7 @@ public:
         c10::ArrayRef<std::optional<torch::Tensor>> spec_decoding_tensor_params,
         torch::optional<torch::Tensor> attention_sinks) const override
     {
+        printf("==============Runner::run===============\n");
         auto stream = at::cuda::getCurrentCUDAStream(qkv_or_q.get_device());
         T* attention_input = static_cast<T*>(qkv_or_q.slice(0, token_offset).data_ptr());
         T* k_ptr = nullptr;
@@ -501,6 +502,8 @@ void attention(torch::Tensor q, std::optional<torch::Tensor> k, std::optional<to
     std::optional<int64_t> attention_chunk_size, std::optional<torch::Tensor> softmax_stats_tensor,
     std::vector<bool> spec_decoding_bool_params, std::vector<std::optional<torch::Tensor>> spec_decoding_tensor_params)
 {
+    printf("==============attention===============\n");
+    // 1. 函数入口和参数验证
     TLLM_LOG_TRACE("Attention op starts at layer %d", layer_idx);
     // Use these tensors to infer if the attention is using KV cache
     bool const use_kv_cache = kv_cache_block_offsets.has_value() && host_kv_cache_block_offsets.has_value()
@@ -520,6 +523,7 @@ void attention(torch::Tensor q, std::optional<torch::Tensor> k, std::optional<to
         TLLM_CHECK_WITH_INFO(v.has_value(), "The v tensor should be provided if updating KV cache with unfused K/V");
     }
 
+    // 2. 数据类型检测和Runner创建
     auto const dtype = tensorrt_llm::runtime::TorchUtils::dataType(qkv_or_q.scalar_type());
     bool const is_fp8_out = out_dtype.has_value() && out_dtype.value() == torch::kFloat8_e4m3fn;
     bool const is_fp4_out = out_dtype.has_value() && out_dtype.value() == torch::kUInt8;
@@ -575,6 +579,7 @@ void attention(torch::Tensor q, std::optional<torch::Tensor> k, std::optional<to
     int64_t const rotary_embedding_max_positions = rotary_embedding_max_position_info[0];
     int64_t const rotary_embedding_original_max_positions = rotary_embedding_max_position_info[1];
 
+    // 3. AttentionOp创建和初始化
     auto op = std::make_shared<AttentionOp>();
     op->mType = dtype;
     op->mFMHAForceFP32Acc = dtype == nvinfer1::DataType::kBF16;
@@ -641,6 +646,7 @@ void attention(torch::Tensor q, std::optional<torch::Tensor> k, std::optional<to
         op->mHeadSize = op->mMLAParams.kv_lora_rank + op->mMLAParams.qk_rope_head_dim;
     }
 
+    // 4. 缓存检查和初始化
     auto cache_key = std::make_tuple(op->data(), runner->data());
     using CacheKey = decltype(cache_key);
     static std::unordered_map<CacheKey, std::shared_ptr<AttentionOp>, hash<CacheKey>> op_cache;
@@ -658,6 +664,7 @@ void attention(torch::Tensor q, std::optional<torch::Tensor> k, std::optional<to
         op_cache[cache_key] = op;
     }
 
+    // 5. 请求类型和输入类型检测:ctx, gen: for continuous batching
     int32_t const num_seqs = host_context_lengths.size(0);
     RequestType const* request_types = static_cast<RequestType const*>(host_request_types.data_ptr());
 
@@ -690,6 +697,7 @@ void attention(torch::Tensor q, std::optional<torch::Tensor> k, std::optional<to
         TLLM_CHECK(request_types[idx] == RequestType::kGENERATION);
     }
 
+    // 6. 工作空间管理
     int32_t const max_attention_window_size
         = beam_width == 1 ? attention_window_size : cache_indirection.value().size(2);
     int64_t const workspace_size = runner->getWorkspaceSize(*op, num_tokens, max_attention_window_size, num_gen_tokens);

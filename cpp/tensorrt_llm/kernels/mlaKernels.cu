@@ -930,6 +930,33 @@ void invokeMLARopeContext(MlaParams<T>& params, KVCacheBuffer kv_cache_buffer, c
         params.cache_type, params.quant_scale_kv);
 }
 
+__global__ void printCudaVectorInt32(int32_t const* vec, int32_t size)
+{
+    for (int i = 0; i < size; i++)
+    {
+        printf("%d, ", vec[i]);
+    }
+    printf("\n");
+}
+
+__global__ void printCudaVectorUint32(uint32_t const* vec, int32_t size)
+{
+    for (int i = 0; i < size; i++)
+    {
+        printf("%u, ", vec[i]);
+    }
+    printf("\n");
+}
+
+__global__ void printCudaVectorFloat(float const* vec, int32_t size)
+{
+    for (int i = 0; i < size; i++)
+    {
+        printf("%f, ", vec[i]);
+    }
+    printf("\n");
+}
+
 template <typename T>
 void invokeMLAContextFp8Quantize(MlaParams<T>& params, int total_kv_len, cudaStream_t stream)
 {
@@ -987,12 +1014,78 @@ void invokeMLARopeGeneration(MlaParams<T>& params, KVCacheBuffer kv_cache_buffer
     attrs[0].val.programmaticStreamSerializationAllowed = tensorrt_llm::common::getEnvEnablePDL();
     config.numAttrs = 1;
     config.attrs = attrs;
+    printf("=================invokeMLARopeGeneration============\n");
+    printf("head_num: %zu\n", params.head_num);
+    printf("kv_lora_rank: %d\n", params.meta.kv_lora_rank);
+    printf("acc_q_len: %d\n", params.acc_q_len);
+    printf("seq_len: %d\n", seq_len);
+    printf("q_pe_ld: %d\n", params.q_pe_ld);
+    printf("q_pe_stride: %d\n", params.q_pe_stride);
+    printf("cache_type: %d\n", static_cast<int>(params.cache_type));
+    printf("host_bmm1_scale: %f\n", params.host_bmm1_scale);
+    // 需要打印一些cuda 的vector变量
+    printf("cache_seq_lens: ");
+    printCudaVectorInt32<<<1, 1, 0, stream>>>(params.cache_seq_lens, params.batch_size);
+    cudaDeviceSynchronize();
+
+    if (params.quant_scale_o)
+    {
+        printf("quant_scale_o: ");
+        printCudaVectorFloat<<<1, 1, 0, stream>>>(params.quant_scale_o, 1);
+        cudaDeviceSynchronize();
+    }
+
+    if (params.quant_scale_q)
+    {
+        printf("quant_scale_q: ");
+        printCudaVectorFloat<<<1, 1, 0, stream>>>(params.quant_scale_q, 1);
+        cudaDeviceSynchronize();
+    }
+    if (params.quant_scale_kv)
+    {
+        printf("quant_scale_kv: ");
+        printCudaVectorFloat<<<1, 1, 0, stream>>>(params.quant_scale_kv, 1);
+        cudaDeviceSynchronize();
+    }
+
+    if (params.bmm1_scale)
+    {
+        printf("bmm1_scale: ");
+        printCudaVectorFloat<<<1, 1, 0, stream>>>(params.bmm1_scale, 2);
+        cudaDeviceSynchronize();
+    }
+    if (params.bmm2_scale)
+    {
+        printf("bmm2_scale: ");
+        printCudaVectorFloat<<<1, 1, 0, stream>>>(params.bmm2_scale, 1);
+        cudaDeviceSynchronize();
+    }
+
     cudaLaunchKernelEx(&config, kernel_instance, params.q_buf, params.q_pe, params.latent_cache, params.quant_q_buf,
         kv_cache_buffer, params.cos_sin_cache, params.head_num, params.meta.kv_lora_rank, params.acc_q_len, seq_len,
         params.seqQOffset, params.fmha_tile_counter, params.cache_seq_lens, params.cu_kv_seqlens, params.q_pe_ld,
         params.q_pe_stride, params.cache_type, params.bmm1_scale, params.bmm2_scale, params.quant_scale_o,
         params.quant_scale_q, params.quant_scale_kv, params.dequant_scale_q, params.dequant_scale_kv,
         params.host_bmm1_scale);
+
+    cudaDeviceSynchronize();
+    printf("Output\n");
+    printf("seqQOffset: ");
+    printCudaVectorInt32<<<1, 1, 0, stream>>>(params.seqQOffset, params.batch_size + 1);
+    cudaDeviceSynchronize();
+    printf("seqKVOffsets: ");
+    printCudaVectorInt32<<<1, 1, 0, stream>>>(params.cu_kv_seqlens, params.batch_size + 1);
+    cudaDeviceSynchronize();
+    printf("fmha_tile_counter: ");
+    printCudaVectorUint32<<<1, 1, 0, stream>>>(params.fmha_tile_counter, 1);
+    cudaDeviceSynchronize();
+    printf("bmm1_scale: ");
+    printCudaVectorFloat<<<1, 1, 0, stream>>>(params.bmm1_scale, 2);
+    cudaDeviceSynchronize();
+    printf("bmm2_scale: ");
+    printCudaVectorFloat<<<1, 1, 0, stream>>>(params.bmm2_scale, 1);
+    cudaDeviceSynchronize();
+    printf("====================\n");
 }
 
 template <typename T, typename TCache>
