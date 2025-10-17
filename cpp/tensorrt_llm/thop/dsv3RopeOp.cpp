@@ -115,13 +115,12 @@ struct MlaRopeGenArgs
     int32_t num_tokens;
     int32_t num_heads;
     tk::MlaMetaParams mla_meta_params;
-    void* workspace_byte_ptr;
     int32_t const* sequence_lengths_ptr;
     int32_t max_context_q_len;
     int const* block_ids_per_seq_ptr;
     KvCacheDataType cache_type;
-    int* cu_q_seqlens;
-    int* cu_kv_seqlens;
+    int* cu_q_seqlens_ptr;
+    int* cu_kv_seqlens_ptr;
     uint32_t* fmha_tile_counter_ptr;
     float* mla_bmm1_scale_ptr;
     float* mla_bmm2_scale_ptr;
@@ -147,7 +146,6 @@ void invokeMLARopeGenerationHelper(T const* latent_cache_ptr, T* q_pe_ptr, T* fu
     mla_params.acc_q_len = args.num_tokens;
     mla_params.head_num = args.num_heads;
     mla_params.meta = args.mla_meta_params;
-    mla_params.workspace = reinterpret_cast<void*>(args.workspace_byte_ptr);
 
     mla_params.cache_seq_lens = args.sequence_lengths_ptr;
     mla_params.max_input_seq_len = args.max_context_q_len;
@@ -157,8 +155,8 @@ void invokeMLARopeGenerationHelper(T const* latent_cache_ptr, T* q_pe_ptr, T* fu
     // mlaGeneration()
     mla_params.cache_type = args.cache_type;
 
-    mla_params.seqQOffset = args.cu_q_seqlens;
-    mla_params.cu_kv_seqlens = args.cu_kv_seqlens;
+    mla_params.seqQOffset = args.cu_q_seqlens_ptr;
+    mla_params.cu_kv_seqlens = args.cu_kv_seqlens_ptr;
     mla_params.fmha_tile_counter = args.fmha_tile_counter_ptr;
     mla_params.bmm1_scale = args.mla_bmm1_scale_ptr;
     mla_params.bmm2_scale = args.mla_bmm2_scale_ptr;
@@ -196,7 +194,9 @@ output:
 void MLARopeGeneration(torch::Tensor fused_q, // [q_len, 128 * 576] gen only
     torch::Tensor q_pe,                       // [q_len, 128, 64] gen only
     torch::Tensor latent_cache,               // [q_len, 576] gen only
-    std::optional<torch::Tensor> rotary_cos_sin, std::optional<torch::Tensor> workspace_,
+    std::optional<torch::Tensor> rotary_cos_sin, torch::Tensor cu_q_seqlens, torch::Tensor cu_kv_seqlens,
+    torch::Tensor fmha_scheduler_counter, std::optional<torch::Tensor> mla_bmm1_scale,
+    std::optional<torch::Tensor> mla_bmm2_scale, std::optional<torch::Tensor> quant_q_buffer,
     // kv cache related
     torch::Tensor sequence_length, torch::Tensor host_past_key_value_lengths, torch::Tensor host_context_lengths,
 
@@ -241,6 +241,7 @@ void MLARopeGeneration(torch::Tensor fused_q, // [q_len, 128 * 576] gen only
         && host_kv_cache_pool_pointers.has_value() && host_kv_cache_pool_mapping.has_value();
 
     // continuous batching related
+
     int32_t const num_seqs = host_context_lengths.size(0); // num_seqs = num_ctx + num_gen
     int32_t const num_contexts = 0;
     int32_t const num_generations = num_seqs - num_contexts;
@@ -255,90 +256,15 @@ void MLARopeGeneration(torch::Tensor fused_q, // [q_len, 128 * 576] gen only
         static_cast<int>(qk_nope_head_dim), static_cast<int>(qk_rope_head_dim), static_cast<int>(v_head_dim),
         static_cast<int>(predicted_tokens_per_seq), static_cast<int>(layer_num)};
 
-    // workspace部分
-    int64_t const workspace_size = getWorkspaceSizeForMLAGeneration(
-        num_generations, fp8_generation_mla, num_tokens, num_heads, kv_lora_rank, qk_rope_head_dim);
-    TLLM_LOG_TRACE("Expected workspace size is %ld bytes", workspace_size);
-    if (workspace_size >= (16l << 30))
-    {
-        auto const [free_mem, total_mem] = tc::getDeviceMemoryInfo(false);
-        if (workspace_size >= static_cast<int64_t const>(free_mem))
-        {
-            throw std::runtime_error("attention workspace size " + std::to_string(workspace_size)
-                + " bytes, exceeds available CUDA memory " + std::to_string(free_mem) + " bytes");
-        }
-    }
-
-    torch::Tensor workspace;
-    if (workspace_.has_value())
-    {
-        if (workspace_.value().numel() < workspace_size)
-        {
-            TLLM_LOG_WARNING("Attention workspace size is not enough, increase the size from %ld bytes to %ld bytes",
-                workspace_.value().numel(), workspace_size);
-            workspace_.value().resize_({workspace_size});
-        }
-        workspace = workspace_.value();
-    }
-    else
-    {
-        printf("workspace_ is empty, create new workspace\n");
-        workspace = torch::empty({workspace_size}, torch::dtype(torch::kByte).device(fused_q.device()));
-        workspace_ = workspace;
-    }
-
-    // 打印 workspace_ 的 shape（如果存在）
-    if (workspace_.has_value())
-    {
-        std::cout << "workspace_ shape: [";
-        for (int i = 0; i < workspace_.value().sizes().size(); ++i)
-        {
-            std::cout << workspace_.value().size(i);
-            if (i != workspace_.value().sizes().size() - 1)
-            {
-                std::cout << ", ";
-            }
-        }
-        std::cout << "]" << std::endl;
-    }
-    else
-    {
-        std::cout << "workspace_ is empty" << std::endl;
-    }
-
-    // 打印 workspace 的 shape
-    std::cout << "workspace shape: [";
-    for (int i = 0; i < workspace.sizes().size(); ++i)
-    {
-        std::cout << workspace.size(i);
-        if (i != workspace.sizes().size() - 1)
-        {
-            std::cout << ", ";
-        }
-    }
-    std::cout << "]" << std::endl;
-    int8_t* workspace_byte_ptr = reinterpret_cast<int8_t*>(workspace.data_ptr());
-    size_t offset = 0;
-
-    size_t const cu_seqlens_size = sizeof(int) * (num_seqs + 1);
-    size_t const fmha_scheduler_counter = sizeof(uint32_t);
-    size_t const mla_bmm1_scale_size = fp8_generation_mla ? sizeof(float) * 2 : 0;
-    size_t const mla_bmm2_scale_size = fp8_generation_mla ? sizeof(float) : 0;
-    size_t const quant_q_buffer_size
-        = fp8_generation_mla ? num_tokens * size_t(num_heads * (kv_lora_rank + qk_rope_head_dim)) : 0;
-
-    int* cu_q_seqlens = reinterpret_cast<int*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, cu_seqlens_size));
-    int* cu_kv_seqlens = reinterpret_cast<int*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, cu_seqlens_size));
-    uint32_t* fmha_tile_counter_ptr
-        = reinterpret_cast<uint32_t*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, fmha_scheduler_counter));
+    int* cu_q_seqlens_ptr = reinterpret_cast<int*>(cu_q_seqlens.data_ptr());
+    int* cu_kv_seqlens_ptr = reinterpret_cast<int*>(cu_kv_seqlens.data_ptr());
+    uint32_t* fmha_tile_counter_ptr = reinterpret_cast<uint32_t*>(fmha_scheduler_counter.data_ptr());
     float* mla_bmm1_scale_ptr
-        = reinterpret_cast<float*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, mla_bmm1_scale_size));
+        = mla_bmm1_scale.has_value() ? reinterpret_cast<float*>(mla_bmm1_scale.value().data_ptr()) : nullptr;
     float* mla_bmm2_scale_ptr
-        = reinterpret_cast<float*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, mla_bmm2_scale_size));
+        = mla_bmm2_scale.has_value() ? reinterpret_cast<float*>(mla_bmm2_scale.value().data_ptr()) : nullptr;
     void* quant_q_buffer_ptr
-        = reinterpret_cast<void*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, quant_q_buffer_size));
-
-    printf("offset: %ld\n", offset);
+        = quant_q_buffer.has_value() ? reinterpret_cast<void*>(quant_q_buffer.value().data_ptr()) : nullptr;
 
     // pointer preparation, stride,
     float2 const* rotary_cos_sin_ptr = nullptr;
@@ -443,10 +369,9 @@ void MLARopeGeneration(torch::Tensor fused_q, // [q_len, 128 * 576] gen only
     // Currently NVFP4 KV cache is not supported for MLA. An empty placeholder is provided.
 
     MlaRopeGenArgs args{q_pe_ld, q_pe_stride, rotary_cos_sin_ptr, num_seqs, num_tokens, static_cast<int32_t>(num_heads),
-        mla_meta_params, reinterpret_cast<void*>(workspace_byte_ptr), sequence_lengths_ptr, max_context_q_len,
-        block_ids_per_seq_ptr, cache_type, cu_q_seqlens, cu_kv_seqlens, fmha_tile_counter_ptr, mla_bmm1_scale_ptr,
-        mla_bmm2_scale_ptr, quant_q_buffer_ptr, quant_scale_o_ptr, kv_scale_orig_quant_ptr, kv_scale_quant_orig_ptr,
-        host_bmm1_scale};
+        mla_meta_params, sequence_lengths_ptr, max_context_q_len, block_ids_per_seq_ptr, cache_type, cu_q_seqlens_ptr,
+        cu_kv_seqlens_ptr, fmha_tile_counter_ptr, mla_bmm1_scale_ptr, mla_bmm2_scale_ptr, quant_q_buffer_ptr,
+        quant_scale_o_ptr, kv_scale_orig_quant_ptr, kv_scale_quant_orig_ptr, host_bmm1_scale};
 
     auto const input_dtype = fused_q.scalar_type();
     if (input_dtype == torch::kFloat16)
@@ -483,7 +408,12 @@ TORCH_LIBRARY_FRAGMENT(trtllm, m)
         ", Tensor(a!) q_pe"
         ", Tensor latent_cache"
         ", Tensor? rotary_cos_sin"
-        ", Tensor? workspace"
+        ", Tensor cu_q_seqlens"
+        ", Tensor cu_kv_seqlens"
+        ", Tensor fmha_scheduler_counter"
+        ", Tensor? mla_bmm1_scale"
+        ", Tensor? mla_bmm2_scale"
+        ", Tensor? quant_q_buffer"
         ", Tensor sequence_length"
         ", Tensor host_past_key_value_lengths"
         ", Tensor host_context_lengths"

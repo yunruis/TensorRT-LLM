@@ -1344,6 +1344,37 @@ class MLA(nn.Module):
 
         # fused_q contains 1) the result of the following bmm with shape [num_tokens, num_heads, kv_lora_rank]
         # 2) rope(q_pe) with shape [num_tokens, num_heads, qk_rope_head_dim]. rope is applied inside AttentionOp
+        num_seqs = attn_metadata.kv_lens_cuda_runtime.size(0)  # sequence_length
+
+        cu_q_seqlens = torch.empty(num_seqs + 1,
+                                   dtype=torch.int32,
+                                   device=q.device)
+        cu_kv_seqlens = torch.empty(num_seqs + 1,
+                                    dtype=torch.int32,
+                                    device=q.device)
+        fmha_scheduler_counter = torch.empty(1,
+                                             dtype=torch.uint32,
+                                             device=q.device)
+        has_fp8_kv_cache = self.mqa.has_fp8_kv_cache if hasattr(
+            self.mqa, 'has_fp8_kv_cache') else False
+
+        if has_fp8_kv_cache:
+            mla_bmm1_scale = torch.empty(2,
+                                         dtype=torch.float32,
+                                         device=q.device)
+            mla_bmm2_scale = torch.empty(1,
+                                         dtype=torch.float32,
+                                         device=q.device)
+            quant_q_buffer = torch.empty(num_tokens * self.num_heads *
+                                         (self.mla_params.kv_lora_rank +
+                                          self.mla_params.qk_rope_head_dim),
+                                         dtype=torch.uint8,
+                                         device=q.device)
+        else:
+            mla_bmm1_scale = None
+            mla_bmm2_scale = None
+            quant_q_buffer = None
+
         fused_q = torch.empty(
             [
                 num_tokens, self.num_heads,
@@ -1383,8 +1414,10 @@ class MLA(nn.Module):
         if True:
             print("[forward_generation] apply_rope_generation")
             self.mqa.mla_rope_generation(fused_q, q_pe, latent_cache,
-                                         attn_metadata)
-
+                                         attn_metadata, cu_q_seqlens,
+                                         cu_kv_seqlens, fmha_scheduler_counter,
+                                         mla_bmm1_scale, mla_bmm2_scale,
+                                         quant_q_buffer)
         # if self.apply_rotary_emb:
         #     fused_q[..., self.kv_lora_rank:] = q_pe
         fused_q = fused_q.view([
@@ -1404,6 +1437,13 @@ class MLA(nn.Module):
             out_scale=out_scale,
             latent_cache=latent_cache,  # kvcache and k_pe
             q_pe=q_pe,  # used by `invokeMLARopeGeneration`
+            cu_q_seqlens=cu_q_seqlens,  # used by 'mlaGeneration'
+            cu_kv_seqlens=cu_kv_seqlens,  # used by 'mlaGeneration'
+            fmha_scheduler_counter=
+            fmha_scheduler_counter,  # used by 'mlaGeneration'
+            mla_bmm1_scale=mla_bmm1_scale,  # used by 'mlaGeneration'
+            mla_bmm2_scale=mla_bmm2_scale,  # used by 'mlaGeneration'
+            quant_q_buffer=quant_q_buffer,  # used by 'mlaGeneration'
         )
         fused_q = None
 

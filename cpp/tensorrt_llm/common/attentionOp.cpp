@@ -968,33 +968,7 @@ int AttentionOp::mlaGeneration(
     // Workspace pointer shift
     int8_t* workspace_byte_ptr = reinterpret_cast<int8_t*>(params.workspace);
     size_t offset = 0;
-
-    size_t const cu_seqlens_size = sizeof(int) * (params.batch_size + 1);
-    size_t const fmha_scheduler_counter = sizeof(uint32_t);
-    size_t const mla_bmm1_scale_size = mFP8GenerationMLA ? sizeof(float) * 2 : 0;
-    size_t const mla_bmm2_scale_size = mFP8GenerationMLA ? sizeof(float) : 0;
-    size_t const quant_q_buffer_size = mFP8GenerationMLA
-        ? params.acc_q_len * size_t(mNumHeads * (mMLAParams.kv_lora_rank + mMLAParams.qk_rope_head_dim))
-        : 0;
-    int* cu_q_seqlens = reinterpret_cast<int*>(nextWorkspacePtr(workspace_byte_ptr, offset, cu_seqlens_size)); // [bs+1]
-    int* cu_kv_seqlens
-        = reinterpret_cast<int*>(nextWorkspacePtr(workspace_byte_ptr, offset, cu_seqlens_size));               // [bs+1]
-    uint32_t* fmha_tile_counter_ptr
-        = reinterpret_cast<uint32_t*>(nextWorkspacePtr(workspace_byte_ptr, offset, fmha_scheduler_counter));   // [1]
-    float* mla_bmm1_scale_ptr
-        = reinterpret_cast<float*>(nextWorkspacePtr(workspace_byte_ptr, offset, mla_bmm1_scale_size));         // [2]
-    float* mla_bmm2_scale_ptr                                                                                  // [1]
-        = reinterpret_cast<float*>(nextWorkspacePtr(workspace_byte_ptr, offset, mla_bmm2_scale_size));
-    void* quant_q_buffer_ptr // [total_s_len * num_heads * (kv_lora_rank + qk_rope_head_dim)]
-        = reinterpret_cast<__nv_fp8_e4m3*>(nextWorkspacePtr(workspace_byte_ptr, offset, quant_q_buffer_size));
     void* scratch_ptr = nextWorkspacePtr(workspace_byte_ptr, offset);
-
-    params.seqQOffset = cu_q_seqlens;
-    params.cu_kv_seqlens = cu_kv_seqlens;
-    params.fmha_tile_counter = fmha_tile_counter_ptr;
-    params.bmm1_scale = mla_bmm1_scale_ptr;
-    params.bmm2_scale = mla_bmm2_scale_ptr;
-    params.quant_q_buf = quant_q_buffer_ptr;
 
     params.quant_scale_o = generation_params.attention_output_orig_quant;
     params.quant_scale_q = generation_params.kv_scale_orig_quant;
@@ -1234,7 +1208,7 @@ int AttentionOp::mlaGeneration(
             XQAParams xqaParams{};
             this->template convertMMHAParamsToXQAParams<T, decltype(kv_cache_buffer)>(
                 xqaParams, generation_params, /*forConfigurePlugin=*/false);
-            xqaParams.quant_q_buffer_ptr = quant_q_buffer_ptr;
+            xqaParams.quant_q_buffer_ptr = params.quant_q_buf;
             xqaParams.q_scaling
                 = 1 / (mQScaling * sqrtf((float) (mMLAParams.qk_nope_head_dim + mMLAParams.qk_rope_head_dim)));
             if (mEnableXQA && mXqaDispatcher->shouldUse(xqaParams))
@@ -1276,11 +1250,11 @@ int AttentionOp::mlaGeneration(
 
         // fmhaParams.packedMaskPtr = params.fmha_custom_mask;
         fmhaParams.pagedKvCache = kv_cache_buffer;
-        fmhaParams.cuQSeqLenPtr = cu_q_seqlens;
+        fmhaParams.cuQSeqLenPtr = params.seqQOffset;
         fmhaParams.kvSeqLenPtr = params.cache_seq_lens;
-        fmhaParams.cuKvSeqLenPtr = cu_kv_seqlens;
+        fmhaParams.cuKvSeqLenPtr = params.cu_kv_seqlens;
         fmhaParams.cuMaskRowsPtr = nullptr; // mla not support custorm mask right now
-        fmhaParams.tileCounterPtr = fmha_tile_counter_ptr;
+        fmhaParams.tileCounterPtr = params.fmha_tile_counter;
         fmhaParams.scaleBmm1Ptr = reinterpret_cast<float const*>(params.bmm1_scale);
         fmhaParams.scaleBmm2Ptr = reinterpret_cast<float const*>(params.bmm2_scale);
         fmhaParams.stream = stream;

@@ -1079,12 +1079,18 @@ void invokeMLARopeGeneration(MlaParams<T>& params, KVCacheBuffer kv_cache_buffer
     printf("fmha_tile_counter: ");
     printCudaVectorUint32<<<1, 1, 0, stream>>>(params.fmha_tile_counter, 1);
     cudaDeviceSynchronize();
-    printf("bmm1_scale: ");
-    printCudaVectorFloat<<<1, 1, 0, stream>>>(params.bmm1_scale, 2);
-    cudaDeviceSynchronize();
-    printf("bmm2_scale: ");
-    printCudaVectorFloat<<<1, 1, 0, stream>>>(params.bmm2_scale, 1);
-    cudaDeviceSynchronize();
+    if (params.bmm1_scale)
+    {
+        printf("bmm1_scale: ");
+        printCudaVectorFloat<<<1, 1, 0, stream>>>(params.bmm1_scale, 2);
+        cudaDeviceSynchronize();
+    }
+    if (params.bmm2_scale)
+    {
+        printf("bmm2_scale: ");
+        printCudaVectorFloat<<<1, 1, 0, stream>>>(params.bmm2_scale, 1);
+        cudaDeviceSynchronize();
+    }
     printf("====================\n");
 }
 

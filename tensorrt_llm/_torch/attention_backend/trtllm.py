@@ -331,6 +331,12 @@ class TrtllmAttentionWrapper:
         is_fused_qkv: bool = True,
         update_kv_cache: bool = True,
         attention_mask: AttentionMask = PredefinedAttentionMask.CAUSAL,
+        cu_q_seqlens: Optional[torch.Tensor] = None,
+        cu_kv_seqlens: Optional[torch.Tensor] = None,
+        fmha_scheduler_counter: Optional[torch.Tensor] = None,
+        mla_bmm1_scale: Optional[torch.Tensor] = None,
+        mla_bmm2_scale: Optional[torch.Tensor] = None,
+        quant_q_buffer: Optional[torch.Tensor] = None,
     ):
         """
         Run the attention operation.
@@ -681,6 +687,12 @@ class TrtllmAttentionWrapper:
             self.softmax_stats_tensor,
             spec_decoding_bool_params,
             spec_decoding_tensor_params,
+            cu_q_seqlens,
+            cu_kv_seqlens,
+            fmha_scheduler_counter,
+            mla_bmm1_scale,
+            mla_bmm2_scale,
+            quant_q_buffer,
         )
         # reset the planned states (especially tensors) to avoid memory leak
         self.plan()
@@ -1371,6 +1383,12 @@ class TrtllmAttention(AttentionBackend[TrtllmAttentionMetadata]):
         output: Optional[torch.Tensor] = None,
         output_sf: Optional[torch.Tensor] = None,
         attention_sinks: Optional[torch.Tensor] = None,
+        cu_q_seqlens: Optional[torch.Tensor] = None,
+        cu_kv_seqlens: Optional[torch.Tensor] = None,
+        fmha_scheduler_counter: Optional[torch.Tensor] = None,
+        mla_bmm1_scale: Optional[torch.Tensor] = None,
+        mla_bmm2_scale: Optional[torch.Tensor] = None,
+        quant_q_buffer: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
         assert isinstance(
@@ -1476,7 +1494,13 @@ class TrtllmAttention(AttentionBackend[TrtllmAttentionMetadata]):
             out_dtype=out_dtype,
             is_fused_qkv=not metadata.is_cross and k is None,
             update_kv_cache=not metadata.is_cross or k is not None,
-            attention_mask=attention_mask)
+            attention_mask=attention_mask,
+            cu_q_seqlens=cu_q_seqlens,
+            cu_kv_seqlens=cu_kv_seqlens,
+            fmha_scheduler_counter=fmha_scheduler_counter,
+            mla_bmm1_scale=mla_bmm1_scale,
+            mla_bmm2_scale=mla_bmm2_scale,
+            quant_q_buffer=quant_q_buffer)
 
         if use_nvfp4_output:
             return output, output_sf
@@ -1674,15 +1698,18 @@ class TrtllmAttention(AttentionBackend[TrtllmAttentionMetadata]):
         q_pe: torch.Tensor,  # [tokens, num_heads, qk_rope_head_dim]
         latent_cache: torch.Tensor,  # [tokens, kv_lora_rank + qk_rope_head_dim]
         metadata: TrtllmAttentionMetadata,
+        cu_q_seqlens: torch.Tensor,
+        cu_kv_seqlens: torch.Tensor,
+        fmha_scheduler_counter: torch.Tensor,
+        mla_bmm1_scale: torch.Tensor,
+        mla_bmm2_scale: torch.Tensor,
+        quant_q_buffer: torch.Tensor,
         out_scale: Optional[torch.Tensor] = None,
     ) -> None:
 
         assert self.is_mla_enable and self.mla_params is not None
         assert metadata.kv_cache_manager is not None
         sink_token_length = 0
-
-        fused_q.size(0)
-        metadata.kv_lens_cuda_runtime.size(0)
 
         # 打印mla_rope_generation的实参，对张量只打印shape
         print("[mla_rope_generation] arg 1 - fused_q.shape:",
@@ -1695,59 +1722,80 @@ class TrtllmAttention(AttentionBackend[TrtllmAttentionMetadata]):
                   tuple(self.wrapper.rotary_cos_sin.shape))
         else:
             print("[mla_rope_generation] arg 4 - rotary_cos_sin: None")
-        print("[mla_rope_generation] arg 5 - workspace:",
-              self.wrapper.workspace)
-        print("[mla_rope_generation] arg 6 - kv_lens_cuda_runtime:",
+        print("[mla_rope_generation] arg 5 - cu_q_seqlens:", cu_q_seqlens)
+        print("[mla_rope_generation] arg 6 - cu_kv_seqlens:", cu_kv_seqlens)
+        print("[mla_rope_generation] arg 7 - fmha_scheduler_counter:",
+              fmha_scheduler_counter)
+        if mla_bmm1_scale is None:
+            print("[mla_rope_generation] mla_bmm1_scale is None")
+        else:
+            print("[mla_rope_generation] mla_bmm1_scale: ", mla_bmm1_scale)
+
+        if mla_bmm2_scale is None:
+            print("[mla_rope_generation] mla_bmm2_scale is None")
+        else:
+            print("[mla_rope_generation] mla_bmm2_scale: ", mla_bmm2_scale)
+
+        if quant_q_buffer is None:
+            print("[mla_rope_generation] quant_q_buffer is None")
+        else:
+            print("[mla_rope_generation] quant_q_buffer; shape:",
+                  tuple(quant_q_buffer.shape))
+        print("[mla_rope_generation] arg 8 - mla_bmm1_scale:", mla_bmm1_scale)
+        print("[mla_rope_generation] arg 9 - mla_bmm2_scale:", mla_bmm2_scale)
+        print("[mla_rope_generation] arg 10 - quant_q_buffer:", quant_q_buffer)
+
+        print("[mla_rope_generation] arg 11 - kv_lens_cuda_runtime:",
               metadata.kv_lens_cuda_runtime)
-        print("[mla_rope_generation] arg 7 - kv_lens_runtime:",
+        print("[mla_rope_generation] arg 12 - kv_lens_runtime:",
               metadata.kv_lens_runtime)
-        print("[mla_rope_generation] arg 8 - prompt_lens_cpu_runtime:",
+        print("[mla_rope_generation] arg 13 - prompt_lens_cpu_runtime:",
               metadata.prompt_lens_cpu_runtime)
-        print("[mla_rope_generation] arg 9 - kv_cache_block_offsets:",
+        print("[mla_rope_generation] arg 14 - kv_cache_block_offsets:",
               metadata.kv_cache_block_offsets)
-        print("[mla_rope_generation] arg 10 - host_kv_cache_block_offsets:",
+        print("[mla_rope_generation] arg 15 - host_kv_cache_block_offsets:",
               metadata.host_kv_cache_block_offsets)
-        print("[mla_rope_generation] arg 11 - kv_cache_pool_pointers:",
+        print("[mla_rope_generation] arg 16 - kv_cache_pool_pointers:",
               metadata.kv_cache_manager.kv_cache_pool_pointers)
-        print("[mla_rope_generation] arg 12 - kv_cache_pool_mapping:",
+        print("[mla_rope_generation] arg 17 - kv_cache_pool_mapping:",
               metadata.kv_cache_manager.kv_cache_pool_mapping)
-        print("[mla_rope_generation] arg 13 - kv_scale_orig_quant:",
+        print("[mla_rope_generation] arg 18 - kv_scale_orig_quant:",
               self.kv_scale_orig_quant)
-        print("[mla_rope_generation] arg 14 - kv_scale_quant_orig:",
+        print("[mla_rope_generation] arg 19 - kv_scale_quant_orig:",
               self.kv_scale_quant_orig)
-        print("[mla_rope_generation] arg 15 - out_scale:", out_scale)
-        print("[mla_rope_generation] arg 16 - block_ids_per_seq:",
+        print("[mla_rope_generation] arg 20 - out_scale:", out_scale)
+        print("[mla_rope_generation] arg 21 - block_ids_per_seq:",
               metadata.block_ids_per_seq)
-        print("[mla_rope_generation] arg 17 - predicted_tokens_per_seq:",
+        print("[mla_rope_generation] arg 22 - predicted_tokens_per_seq:",
               self.wrapper.predicted_tokens_per_seq)
-        print("[mla_rope_generation] arg 18 - local_layer_idx:",
+        print("[mla_rope_generation] arg 23 - local_layer_idx:",
               self.get_local_layer_idx(metadata))
-        print("[mla_rope_generation] arg 19 - num_heads:",
+        print("[mla_rope_generation] arg 24 - num_heads:",
               self.wrapper.num_heads)
-        print("[mla_rope_generation] arg 20 - num_kv_heads:",
+        print("[mla_rope_generation] arg 25 - num_kv_heads:",
               self.wrapper.num_kv_heads)
-        print("[mla_rope_generation] arg 21 - head_size:",
+        print("[mla_rope_generation] arg 26 - head_size:",
               self.wrapper.head_size)
-        print("[mla_rope_generation] arg 22 - tokens_per_block:",
+        print("[mla_rope_generation] arg 27 - tokens_per_block:",
               metadata.kv_cache_manager.tokens_per_block)
-        print("[mla_rope_generation] arg 23 - attention_window_size:",
+        print("[mla_rope_generation] arg 28 - attention_window_size:",
               self.wrapper.attention_window_size or metadata.max_seq_len)
-        print("[mla_rope_generation] arg 24 - sink_token_length:",
+        print("[mla_rope_generation] arg 29 - sink_token_length:",
               sink_token_length)
-        print("[mla_rope_generation] arg 25 - beam_width:", metadata.beam_width)
-        print("[mla_rope_generation] arg 26 - quant_mode:",
+        print("[mla_rope_generation] arg 30 - beam_width:", metadata.beam_width)
+        print("[mla_rope_generation] arg 31 - quant_mode:",
               self.wrapper.quant_mode)
-        print("[mla_rope_generation] arg 27 - q_scaling:",
+        print("[mla_rope_generation] arg 32 - q_scaling:",
               self.wrapper.q_scaling)
-        print("[mla_rope_generation] arg 28 - q_lora_rank:",
+        print("[mla_rope_generation] arg 33 - q_lora_rank:",
               self.wrapper.q_lora_rank)
-        print("[mla_rope_generation] arg 29 - kv_lora_rank:",
+        print("[mla_rope_generation] arg 34 - kv_lora_rank:",
               self.wrapper.kv_lora_rank)
-        print("[mla_rope_generation] arg 30 - qk_nope_head_dim:",
+        print("[mla_rope_generation] arg 35 - qk_nope_head_dim:",
               self.wrapper.qk_nope_head_dim)
-        print("[mla_rope_generation] arg 31 - qk_rope_head_dim:",
+        print("[mla_rope_generation] arg 36 - qk_rope_head_dim:",
               self.wrapper.qk_rope_head_dim)
-        print("[mla_rope_generation] arg 32 - v_head_dim:",
+        print("[mla_rope_generation] arg 37 - v_head_dim:",
               self.wrapper.v_head_dim)
 
         torch.ops.trtllm.mla_rope_generation(
@@ -1755,7 +1803,13 @@ class TrtllmAttention(AttentionBackend[TrtllmAttentionMetadata]):
             q_pe,
             latent_cache,
             self.wrapper.rotary_cos_sin,
-            self.wrapper.workspace,
+            # self.wrapper.workspace,
+            cu_q_seqlens,
+            cu_kv_seqlens,
+            fmha_scheduler_counter,
+            mla_bmm1_scale,
+            mla_bmm2_scale,
+            quant_q_buffer,
             metadata.kv_lens_cuda_runtime,  # sequence_length
             metadata.kv_lens_runtime,  # host_past_key_value_lengths
             metadata.prompt_lens_cpu_runtime,  # host_context_lengths, 应该包括ctx？

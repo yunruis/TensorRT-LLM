@@ -81,7 +81,10 @@ public:
         torch::optional<torch::Tensor> mrope_rotary_cos_sin, torch::optional<torch::Tensor> mrope_position_deltas,
         torch::optional<torch::Tensor> softmax_stats_tensor,
         c10::ArrayRef<std::optional<torch::Tensor>> spec_decoding_tensor_params,
-        torch::optional<torch::Tensor> attention_sinks) const
+        torch::optional<torch::Tensor> attention_sinks, std::optional<torch::Tensor> cu_q_seqlens,
+        std::optional<torch::Tensor> cu_kv_seqlens, std::optional<torch::Tensor> fmha_scheduler_counter,
+        std::optional<torch::Tensor> mla_bmm1_scale, std::optional<torch::Tensor> mla_bmm2_scale,
+        std::optional<torch::Tensor> quant_q_buffer) const
         = 0;
 };
 
@@ -135,7 +138,10 @@ public:
         torch::optional<torch::Tensor> mrope_rotary_cos_sin, torch::optional<torch::Tensor> mrope_position_deltas,
         torch::optional<torch::Tensor> softmax_stats_tensor,
         c10::ArrayRef<std::optional<torch::Tensor>> spec_decoding_tensor_params,
-        torch::optional<torch::Tensor> attention_sinks) const override
+        torch::optional<torch::Tensor> attention_sinks, std::optional<torch::Tensor> cu_q_seqlens,
+        std::optional<torch::Tensor> cu_kv_seqlens, std::optional<torch::Tensor> fmha_scheduler_counter,
+        std::optional<torch::Tensor> mla_bmm1_scale, std::optional<torch::Tensor> mla_bmm2_scale,
+        std::optional<torch::Tensor> quant_q_buffer) const override
     {
         printf("==============Runner::run===============\n");
         auto stream = at::cuda::getCurrentCUDAStream(qkv_or_q.get_device());
@@ -200,6 +206,22 @@ public:
                 mla_params.q_pe = static_cast<T*>(q_pe->data_ptr());
                 mla_params.q_pe_ld = q_pe->strides()[1];
                 mla_params.q_pe_stride = q_pe->strides()[0];
+
+                mla_params.seqQOffset
+                    = cu_q_seqlens.has_value() ? reinterpret_cast<int*>(cu_q_seqlens.value().data_ptr()) : nullptr;
+                mla_params.cu_kv_seqlens
+                    = cu_kv_seqlens.has_value() ? reinterpret_cast<int*>(cu_kv_seqlens.value().data_ptr()) : nullptr;
+                mla_params.fmha_tile_counter = fmha_scheduler_counter.has_value()
+                    ? reinterpret_cast<uint32_t*>(fmha_scheduler_counter.value().data_ptr())
+                    : nullptr;
+                mla_params.bmm1_scale = mla_bmm1_scale.has_value()
+                    ? reinterpret_cast<float*>(mla_bmm1_scale.value().data_ptr())
+                    : nullptr;
+                mla_params.bmm2_scale = mla_bmm2_scale.has_value()
+                    ? reinterpret_cast<float*>(mla_bmm2_scale.value().data_ptr())
+                    : nullptr;
+                mla_params.quant_q_buf
+                    = quant_q_buffer.has_value() ? reinterpret_cast<void*>(quant_q_buffer.value().data_ptr()) : nullptr;
             }
             mla_params.q_buf = attention_input;
             mla_params.context_buf = reinterpret_cast<T*>(context_buf);
@@ -500,7 +522,10 @@ void attention(torch::Tensor q, std::optional<torch::Tensor> k, std::optional<to
     std::optional<int64_t> qk_rope_head_dim, std::optional<int64_t> v_head_dim,
     std::optional<torch::Tensor> mrope_rotary_cos_sin, std::optional<torch::Tensor> mrope_position_deltas,
     std::optional<int64_t> attention_chunk_size, std::optional<torch::Tensor> softmax_stats_tensor,
-    std::vector<bool> spec_decoding_bool_params, std::vector<std::optional<torch::Tensor>> spec_decoding_tensor_params)
+    std::vector<bool> spec_decoding_bool_params, std::vector<std::optional<torch::Tensor>> spec_decoding_tensor_params,
+    std::optional<torch::Tensor> cu_q_seqlens, std::optional<torch::Tensor> cu_kv_seqlens,
+    std::optional<torch::Tensor> fmha_scheduler_counter, std::optional<torch::Tensor> mla_bmm1_scale,
+    std::optional<torch::Tensor> mla_bmm2_scale, std::optional<torch::Tensor> quant_q_buffer)
 {
     printf("==============attention===============\n");
     // 1. 函数入口和参数验证
@@ -741,7 +766,8 @@ void attention(torch::Tensor q, std::optional<torch::Tensor> k, std::optional<to
             kv_cache_block_offsets, host_kv_cache_block_offsets, host_kv_cache_pool_pointers,
             host_kv_cache_pool_mapping, cache_indirection, kv_scale_orig_quant, kv_scale_quant_orig, out_scale,
             rotary_inv_freq, rotary_cos_sin, latent_cache, q_pe, block_ids_per_seq, mrope_rotary_cos_sin,
-            mrope_position_deltas, softmax_stats_tensor, spec_decoding_tensor_params, attention_sinks);
+            mrope_position_deltas, softmax_stats_tensor, spec_decoding_tensor_params, attention_sinks, cu_q_seqlens,
+            cu_kv_seqlens, fmha_scheduler_counter, mla_bmm1_scale, mla_bmm2_scale, quant_q_buffer);
     }
 
     if ((num_generations > 0) && (attn_input_type != AttentionInputType::ContextOnly))
@@ -757,7 +783,8 @@ void attention(torch::Tensor q, std::optional<torch::Tensor> k, std::optional<to
             kv_cache_block_offsets, host_kv_cache_block_offsets, host_kv_cache_pool_pointers,
             host_kv_cache_pool_mapping, cache_indirection, kv_scale_orig_quant, kv_scale_quant_orig, out_scale,
             rotary_inv_freq, rotary_cos_sin, latent_cache, q_pe, block_ids_per_seq, mrope_rotary_cos_sin,
-            mrope_position_deltas, softmax_stats_tensor, spec_decoding_tensor_params, attention_sinks);
+            mrope_position_deltas, softmax_stats_tensor, spec_decoding_tensor_params, attention_sinks, cu_q_seqlens,
+            cu_kv_seqlens, fmha_scheduler_counter, mla_bmm1_scale, mla_bmm2_scale, quant_q_buffer);
     }
 
     TLLM_LOG_TRACE("Attention op stops at layer %d", layer_idx);
