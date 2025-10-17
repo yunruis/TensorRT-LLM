@@ -1751,6 +1751,8 @@ class TrtllmAttention(AttentionBackend[TrtllmAttentionMetadata]):
               metadata.kv_lens_runtime)
         print("[mla_rope_generation] arg 13 - prompt_lens_cpu_runtime:",
               metadata.prompt_lens_cpu_runtime)
+        print("[mla_rope_generation] arg 13 - num_contexts:",
+              metadata.num_contexts)
         print("[mla_rope_generation] arg 14 - kv_cache_block_offsets:",
               metadata.kv_cache_block_offsets)
         print("[mla_rope_generation] arg 15 - host_kv_cache_block_offsets:",
@@ -1813,6 +1815,7 @@ class TrtllmAttention(AttentionBackend[TrtllmAttentionMetadata]):
             metadata.kv_lens_cuda_runtime,  # sequence_length
             metadata.kv_lens_runtime,  # host_past_key_value_lengths
             metadata.prompt_lens_cpu_runtime,  # host_context_lengths, 应该包括ctx？
+            metadata.num_contexts,
             metadata.kv_cache_block_offsets,
             metadata.host_kv_cache_block_offsets,
             metadata.kv_cache_manager.kv_cache_pool_pointers,

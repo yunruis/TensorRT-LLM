@@ -1018,7 +1018,6 @@ class MLA(nn.Module):
             )
         print("[forward_impl] num_generations: ", num_generations)
         if num_generations > 0:
-            exit(0)
             q_gen = q[num_ctx_tokens:, ...]
             compressed_kv_gen = compressed_kv[num_ctx_tokens:, ...]
             k_pe_gen = k_pe[num_ctx_tokens:, ...]
@@ -1365,11 +1364,11 @@ class MLA(nn.Module):
             mla_bmm2_scale = torch.empty(1,
                                          dtype=torch.float32,
                                          device=q.device)
-            quant_q_buffer = torch.empty(num_tokens * self.num_heads *
-                                         (self.mla_params.kv_lora_rank +
-                                          self.mla_params.qk_rope_head_dim),
-                                         dtype=torch.uint8,
-                                         device=q.device)
+            quant_q_buffer = torch.empty(
+                num_tokens * self.num_heads *
+                (self.kv_lora_rank + self.qk_rope_head_dim),
+                dtype=torch.uint8,
+                device=q.device)
         else:
             mla_bmm1_scale = None
             mla_bmm2_scale = None

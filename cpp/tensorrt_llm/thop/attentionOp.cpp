@@ -145,7 +145,41 @@ public:
     {
         printf("==============Runner::run===============\n");
         auto stream = at::cuda::getCurrentCUDAStream(qkv_or_q.get_device());
+        auto attention_input_tensor = qkv_or_q.slice(0, token_offset);
         T* attention_input = static_cast<T*>(qkv_or_q.slice(0, token_offset).data_ptr());
+        printf("[Runner::run] token_offset: %d\n", token_offset);
+        // INSERT_YOUR_CODE
+        // Print attention_input's shape and qkv_or_q's shape
+        // For attention_input, we attempt to reconstruct the shape from qkv_or_q and token_offset, since
+        // attention_input is a slice.
+        auto qkv_shape = qkv_or_q.sizes();
+        std::cout << "[Runner::run] qkv_or_q shape: [";
+        for (size_t i = 0; i < qkv_shape.size(); ++i)
+        {
+            std::cout << qkv_shape[i];
+            if (i + 1 < qkv_shape.size())
+                std::cout << ", ";
+        }
+        std::cout << "]" << std::endl;
+
+        std::cout << "attention_input_tensor shape: [";
+        for (int i = 0; i < attention_input_tensor.dim(); ++i)
+        {
+            std::cout << attention_input_tensor.size(i);
+            if (i != attention_input_tensor.dim() - 1)
+                std::cout << ", ";
+        }
+        std::cout << "]" << std::endl;
+
+        std::cout << "sequence_length shape: [";
+        for (int i = 0; i < sequence_length.dim(); ++i)
+        {
+            std::cout << sequence_length.size(i);
+            if (i != sequence_length.dim() - 1)
+                std::cout << ", ";
+        }
+        std::cout << "]" << std::endl;
+
         T* k_ptr = nullptr;
         T* v_ptr = nullptr;
         AttentionOutT* context_buf = static_cast<AttentionOutT*>(output.slice(0, token_offset).data_ptr());
@@ -775,6 +809,7 @@ void attention(torch::Tensor q, std::optional<torch::Tensor> k, std::optional<to
 
         auto seq_offset = num_contexts;
         auto token_offset = is_gen_only ? 0 : num_ctx_tokens;
+        printf("[Runner::run] is_gen_only: %d\n", is_gen_only);
         runner->run(*op,
             /*is_context=*/false, seq_offset,
             /*num_seqs=*/num_generations, token_offset,

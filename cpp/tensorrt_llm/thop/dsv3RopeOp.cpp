@@ -19,8 +19,9 @@
 
 namespace tk = tensorrt_llm::kernels;
 namespace tc = tensorrt_llm::common;
-using tk::KVBlockArray;
-using tk::KvCacheDataType;
+namespace tr = tensorrt_llm::runtime;
+
+// using tensorrt_llm::runtime::RequestType;
 
 namespace torch_ext
 {
@@ -111,14 +112,14 @@ struct MlaRopeGenArgs
     int32_t q_pe_ld;
     int32_t q_pe_stride;
     float2 const* rotary_cos_sin_ptr;
-    int32_t num_seqs;
-    int32_t num_tokens;
+    int32_t num_generations;
+    int32_t num_gen_tokens;
     int32_t num_heads;
     tk::MlaMetaParams mla_meta_params;
     int32_t const* sequence_lengths_ptr;
     int32_t max_context_q_len;
     int const* block_ids_per_seq_ptr;
-    KvCacheDataType cache_type;
+    tk::KvCacheDataType cache_type;
     int* cu_q_seqlens_ptr;
     int* cu_kv_seqlens_ptr;
     uint32_t* fmha_tile_counter_ptr;
@@ -142,8 +143,8 @@ void invokeMLARopeGenerationHelper(T const* latent_cache_ptr, T* q_pe_ptr, T* fu
     mla_params.q_pe_stride = args.q_pe_stride;
     mla_params.q_buf = fused_q_ptr;
     mla_params.cos_sin_cache = args.rotary_cos_sin_ptr;
-    mla_params.batch_size = args.num_seqs;
-    mla_params.acc_q_len = args.num_tokens;
+    mla_params.batch_size = args.num_generations;
+    mla_params.acc_q_len = args.num_gen_tokens;
     mla_params.head_num = args.num_heads;
     mla_params.meta = args.mla_meta_params;
 
@@ -199,9 +200,9 @@ void MLARopeGeneration(torch::Tensor fused_q, // [q_len, 128 * 576] gen only
     std::optional<torch::Tensor> mla_bmm2_scale, std::optional<torch::Tensor> quant_q_buffer,
     // kv cache related
     torch::Tensor sequence_length, torch::Tensor host_past_key_value_lengths, torch::Tensor host_context_lengths,
-
-    std::optional<torch::Tensor> kv_cache_block_offsets, std::optional<torch::Tensor> host_kv_cache_block_offsets,
-    std::optional<torch::Tensor> host_kv_cache_pool_pointers, std::optional<torch::Tensor> host_kv_cache_pool_mapping,
+    int64_t const num_contexts, std::optional<torch::Tensor> kv_cache_block_offsets,
+    std::optional<torch::Tensor> host_kv_cache_block_offsets, std::optional<torch::Tensor> host_kv_cache_pool_pointers,
+    std::optional<torch::Tensor> host_kv_cache_pool_mapping,
     // fp8 attn related
     torch::optional<torch::Tensor> kv_scale_orig_quant, // [1] q,k quant scale
     torch::optional<torch::Tensor> kv_scale_quant_orig, // [1] bmm quant scale
@@ -231,7 +232,7 @@ void MLARopeGeneration(torch::Tensor fused_q, // [q_len, 128 * 576] gen only
     TLLM_CHECK_WITH_INFO(num_kv_heads == 1, "num_kv_heads must = 1");
 
     auto const kv_cache_quant_mode = tc::QuantMode(uint32_t(quant_mode));
-    bool const fp8_generation_mla = kv_cache_quant_mode.hasFp8KvCache();
+    // bool const fp8_generation_mla = kv_cache_quant_mode.hasFp8KvCache();
     bool const use_gen_flash_mla = tc::getSMVersion() == 90 && tokens_per_block == 64;
     TLLM_CHECK_WITH_INFO(!kv_cache_quant_mode.hasFp4KvCache(), "FP4 KV cache is not supported for MLA generation.");
     TLLM_CHECK_WITH_INFO(
@@ -241,13 +242,14 @@ void MLARopeGeneration(torch::Tensor fused_q, // [q_len, 128 * 576] gen only
         && host_kv_cache_pool_pointers.has_value() && host_kv_cache_pool_mapping.has_value();
 
     // continuous batching related
-
     int32_t const num_seqs = host_context_lengths.size(0); // num_seqs = num_ctx + num_gen
-    int32_t const num_contexts = 0;
+
+    int32_t const num_tokens = fused_q.size(0);
     int32_t const num_generations = num_seqs - num_contexts;
-    int32_t const num_gen_tokens = fused_q.size(0);
-    int32_t const num_tokens = num_gen_tokens;
+    int32_t const num_gen_tokens = num_tokens; // mla always do generation only
+
     int32_t const seq_offset = num_contexts;
+    // int32_t const token_offset = num_ctx_tokens;
 
     // model config related
     int32_t const layer_num = host_kv_cache_pool_mapping.value().size(0);
@@ -276,7 +278,8 @@ void MLARopeGeneration(torch::Tensor fused_q, // [q_len, 128 * 576] gen only
     int const* sequence_lengths_ptr = sequence_length.slice(0, seq_offset).data_ptr<int>();
     // Note we still need context length during generation for MMHA optimization.
     int32_t const max_context_q_len
-        = host_context_lengths.slice(0, seq_offset, seq_offset + num_seqs).max().item<int32_t>();
+        = host_context_lengths.slice(0, seq_offset, seq_offset + num_generations).max().item<int32_t>();
+    printf("[MLARopeGeneration] max_context_q_len: %d\n", max_context_q_len);
 
     TORCH_CHECK(q_pe.defined());
     TORCH_CHECK(q_pe.dim() == 3);
@@ -314,8 +317,8 @@ void MLARopeGeneration(torch::Tensor fused_q, // [q_len, 128 * 576] gen only
         : 0;
     auto const intra_pool_offset = layer_idx_in_cache_pool * kv_factor * bytes_per_block;
 
-    KVBlockArray::DataType* block_offsets
-        = static_cast<KVBlockArray::DataType*>(use_kv_cache && kv_cache_block_offsets.has_value()
+    tk::KVBlockArray::DataType* block_offsets
+        = static_cast<tk::KVBlockArray::DataType*>(use_kv_cache && kv_cache_block_offsets.has_value()
                 ? kv_cache_block_offsets.value().index({pool_index, seq_offset}).data_ptr()
                 : nullptr);
 
@@ -361,17 +364,19 @@ void MLARopeGeneration(torch::Tensor fused_q, // [q_len, 128 * 576] gen only
     // 3. mla_generation()
     int32_t const batch_beam = beam_width * num_generations;
 
-    KvCacheDataType cache_type = (kv_cache_quant_mode.hasFp8KvCache() ? KvCacheDataType::FP8 : KvCacheDataType::BASE);
+    tk::KvCacheDataType cache_type
+        = (kv_cache_quant_mode.hasFp8KvCache() ? tk::KvCacheDataType::FP8 : tk::KvCacheDataType::BASE);
 
-    auto kv_cache_buffer = KVBlockArray(batch_beam, max_blocks_per_sequence, tokens_per_block, bytes_per_token,
+    auto kv_cache_buffer = tk::KVBlockArray(batch_beam, max_blocks_per_sequence, tokens_per_block, bytes_per_token,
         cyclic_attention_window_size, max_cyclic_attention_window_size, sink_token_length, can_use_one_more_block,
         host_primary_pool_pointer, host_secondary_pool_pointer, block_offsets);
     // Currently NVFP4 KV cache is not supported for MLA. An empty placeholder is provided.
 
-    MlaRopeGenArgs args{q_pe_ld, q_pe_stride, rotary_cos_sin_ptr, num_seqs, num_tokens, static_cast<int32_t>(num_heads),
-        mla_meta_params, sequence_lengths_ptr, max_context_q_len, block_ids_per_seq_ptr, cache_type, cu_q_seqlens_ptr,
-        cu_kv_seqlens_ptr, fmha_tile_counter_ptr, mla_bmm1_scale_ptr, mla_bmm2_scale_ptr, quant_q_buffer_ptr,
-        quant_scale_o_ptr, kv_scale_orig_quant_ptr, kv_scale_quant_orig_ptr, host_bmm1_scale};
+    MlaRopeGenArgs args{q_pe_ld, q_pe_stride, rotary_cos_sin_ptr, num_generations, num_gen_tokens,
+        static_cast<int32_t>(num_heads), mla_meta_params, sequence_lengths_ptr, max_context_q_len,
+        block_ids_per_seq_ptr, cache_type, cu_q_seqlens_ptr, cu_kv_seqlens_ptr, fmha_tile_counter_ptr,
+        mla_bmm1_scale_ptr, mla_bmm2_scale_ptr, quant_q_buffer_ptr, quant_scale_o_ptr, kv_scale_orig_quant_ptr,
+        kv_scale_quant_orig_ptr, host_bmm1_scale};
 
     auto const input_dtype = fused_q.scalar_type();
     if (input_dtype == torch::kFloat16)
@@ -417,6 +422,7 @@ TORCH_LIBRARY_FRAGMENT(trtllm, m)
         ", Tensor sequence_length"
         ", Tensor host_past_key_value_lengths"
         ", Tensor host_context_lengths"
+        ", int num_contexts"
         ", Tensor? kv_cache_block_offsets"
         ", Tensor? host_kv_cache_block_offsets"
         ", Tensor? host_kv_cache_pool_pointers"
