@@ -29,8 +29,6 @@ set_value_in_command() {
     echo "$result"
 }
 
-resultsPath=$jobWorkspace/results
-mkdir -p $resultsPath
 if [ $SLURM_LOCALID -eq 0 ]; then
     # save job ID in $jobWorkspace/slurm_job_id.txt for later job to retrieve
     echo $SLURM_JOB_ID > $jobWorkspace/slurm_job_id.txt
@@ -98,10 +96,6 @@ echo "Full Command: $pytestCommand"
         fi
     done
  fi
-
-# Turn off "exit on error" so the following lines always run
-set +e
-trap - ERR
 
 eval $pytestCommand
 echo "Rank${SLURM_PROCID} Pytest finished execution"

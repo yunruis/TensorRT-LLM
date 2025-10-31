@@ -140,7 +140,7 @@ def uploadResults(def pipeline, SlurmCluster cluster, String nodeName, String st
 
         pipeline.stage('Submit Test Results') {
             sh "mkdir -p ${stageName}"
-            def resultsFilePath = "/home/svc_tensorrt/bloom/scripts/${nodeName}/results/results.xml"
+            def resultsFilePath = "/home/svc_tensorrt/bloom/scripts/${nodeName}/results.xml"
             def downloadResultCmd = "sshpass -p '${remote.passwd}' scp -r -p ${COMMON_SSH_OPTIONS} ${remote.user}@${remote.host}:${resultsFilePath} ${stageName}/"
             downloadSucceed = sh(script: downloadResultCmd, returnStatus: true) == 0
             if (downloadSucceed) {
@@ -198,9 +198,11 @@ def runIsolatedTests(preprocessedLists, testCmdLine, llmSrc, stageName) {
         } catch (Exception e) {
             def isRerunFailed = rerunFailedTests(stageName, llmSrc, isolateTestCmdLine, "results_isolated_${i}.xml", "isolated_${i}")
             if (isRerunFailed) {
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    error "Isolated test ${i} (${isolateTestName}) failed after rerun attempt"
+                }
                 // Mark that at least one isolated test failed, but continue processing other tests
                 rerunFailed = true
-                echo "Isolated test ${i} (${isolateTestName}) failed after rerun attempt, continuing with remaining tests"
             }
         } finally {
             // Clean up the temporary test file
@@ -894,6 +896,7 @@ def runLLMTestlistWithSbatch(pipeline, platform, testList, config=VANILLA_CONFIG
                     pytestUtil,
                     [
                       "--test-list=$testListPathNode",
+                      "--splitting-algorithm least_duration",
                       "--splits $splits",
                       "--group $splitId"
                     ]
@@ -1293,14 +1296,14 @@ def createKubernetesPodConfig(image, type, arch = "amd64", gpuCount = 1, perfMod
                     kubernetes.io/os: linux
                     nvidia.com/gpu_type: ${gpuType}"""
         } else if (perfMode && !hasMultipleGPUs) {
-        // Not using the "perf" node currently due to hardware resource constraint.
         // Use single GPU machine with "tensorrt/test_type: perf" for stable perf testing.
         // H100 / A100 single GPU machine has this unique label in TensorRT Blossom pool.
             selectors = """
                     kubernetes.io/arch: ${arch}
                     kubernetes.io/os: linux
                     nvidia.com/gpu_type: ${gpuType}
-                    nvidia.com/driver_version: '${driverVersion}'"""
+                    nvidia.com/driver_version: '${driverVersion}'
+                    tensorrt/test_type: perf"""
         }
         else
         {
@@ -1775,9 +1778,11 @@ def getSSHConnectionPorts(portConfigFile, stageName)
     return [userPort, monitorPort]
 }
 
+// Return true means the test rerun also fails. Return false otherwise.
 def rerunFailedTests(stageName, llmSrc, testCmdLine, resultFileName="results.xml", testType="regular") {
     if (!fileExists("${WORKSPACE}/${stageName}/${resultFileName}")) {
-        error "There is not ${resultFileName} file, skip the rerun step"
+        echo "There is no ${resultFileName} file, skip the rerun step"
+        return true
     }
 
     // Create rerun directory structure to avoid conflicts
@@ -1799,7 +1804,8 @@ def rerunFailedTests(stageName, llmSrc, testCmdLine, resultFileName="results.xml
     def rerunTestList = "${rerunDir}/rerun_0.txt"
     if (fileExists(rerunTestList)) {
         sh "cat ${rerunTestList}"
-        error "There are some failed tests that cannot be rerun, skip the rerun step."
+        echo "There are some failed tests that cannot be rerun, skip the rerun step."
+        return true
     }
 
     // If the stage has more than 5 failed tests, skip the rerun step
@@ -1816,9 +1822,11 @@ def rerunFailedTests(stageName, llmSrc, testCmdLine, resultFileName="results.xml
         }
     }
     if (validLineCount > 5) {
-        error "There are more than 5 failed ${testType} tests, skip the rerun step."
+        echo "There are more than 5 failed ${testType} tests, skip the rerun step."
+        return true
     } else if (validLineCount == 0) {
-        error "No failed ${testType} tests need to be rerun, skip the rerun step."
+        echo "No failed ${testType} tests need to be rerun, skip the rerun step."
+        return true
     }
 
     // Rerun tests
@@ -2226,22 +2234,23 @@ def runLLMTestlistOnPlatformImpl(pipeline, platform, testList, config=VANILLA_CO
                         rerunFailed = true
                     }
                 }
-            }
-        }
 
-        // Run the isolated tests if exists
-        if (preprocessedLists.isolateCount > 0) {
-            stage ("[${stageName}] Run Pytest (Isolated)") {
-                echo "There are ${preprocessedLists.isolateCount} isolated tests to run"
-                rerunFailed = runIsolatedTests(preprocessedLists, pytestCommand, llmSrc, stageName) || rerunFailed
-            }
-        } else {
-            echo "No isolated tests to run for stage ${stageName}"
-            noIsolateTests = true
-        }
+                // Run the isolated tests if exists
+                if (preprocessedLists.isolateCount > 0) {
+                    stage ("[${stageName}] Run Pytest (Isolated)") {
+                        echo "There are ${preprocessedLists.isolateCount} isolated tests to run"
+                        rerunFailed = runIsolatedTests(preprocessedLists, pytestCommand, llmSrc, stageName) || rerunFailed
+                    }
+                } else {
+                    echo "No isolated tests to run for stage ${stageName}"
+                    noIsolateTests = true
+                }
 
-        if (noRegularTests && noIsolateTests) {
-            error "No tests were executed for stage ${stageName}, please check the test list and test-db rendering result."
+                if (noRegularTests && noIsolateTests) {
+                    error "No tests were executed for stage ${stageName}, please check the test list and test-db rendering result."
+                }
+
+            }
         }
 
         // Generate comprehensive rerun report if any reruns occurred
@@ -2534,8 +2543,7 @@ def launchTestJobs(pipeline, testFilter)
     // may break the mapping functionality.
 
     x86TestConfigs = [
-        "DGX_H100-4_GPUs-PyTorch-DeepSeek-1": ["dgx-h100-x4", "l0_dgx_h100", 1, 2, 4],
-        "DGX_H100-4_GPUs-PyTorch-DeepSeek-2": ["dgx-h100-x4", "l0_dgx_h100", 2, 2, 4],
+        "DGX_H100-4_GPUs-PyTorch-DeepSeek-1": ["dgx-h100-x4", "l0_dgx_h100", 1, 1, 4],
         "DGX_H100-2_GPUs-PyTorch-Others-1": ["dgx-h100-x2", "l0_dgx_h100", 1, 1, 2],
         "DGX_H100-4_GPUs-PyTorch-GptOss-1": ["dgx-h100-x4", "l0_dgx_h100", 1, 1, 4],
         "DGX_H100-4_GPUs-PyTorch-Others-1": ["dgx-h100-x4", "l0_dgx_h100", 1, 1, 4],
@@ -2559,14 +2567,13 @@ def launchTestJobs(pipeline, testFilter)
         "A100X-PyTorch-1": ["a100x", "l0_a100", 1, 1],
         "L40S-PyTorch-1": ["l40s", "l0_l40s", 1, 2],
         "L40S-PyTorch-2": ["l40s", "l0_l40s", 2, 2],
-        "H100_PCIe-PyTorch-1": ["h100-cr", "l0_h100", 1, 3],
-        "H100_PCIe-PyTorch-2": ["h100-cr", "l0_h100", 2, 3],
-        "H100_PCIe-PyTorch-3": ["h100-cr", "l0_h100", 3, 3],
+        "H100_PCIe-PyTorch-1": ["h100-cr", "l0_h100", 1, 4],
+        "H100_PCIe-PyTorch-2": ["h100-cr", "l0_h100", 2, 4],
+        "H100_PCIe-PyTorch-3": ["h100-cr", "l0_h100", 3, 4],
+        "H100_PCIe-PyTorch-4": ["h100-cr", "l0_h100", 4, 4],
         "H100_PCIe-PyTorch-Ray-1": ["h100-cr", "l0_h100", 1, 1],
-        "H100_PCIe-CPP-1": ["h100-cr", "l0_h100", 1, 2],
-        "H100_PCIe-CPP-2": ["h100-cr", "l0_h100", 2, 2],
-        "H100_PCIe-TensorRT-1": ["h100-cr", "l0_h100", 1, 2],
-        "H100_PCIe-TensorRT-2": ["h100-cr", "l0_h100", 2, 2],
+        "H100_PCIe-CPP-1": ["h100-cr", "l0_h100", 1, 1],
+        "H100_PCIe-TensorRT-1": ["h100-cr", "l0_h100", 1, 1],
         "B200_PCIe-PyTorch-1": ["b100-ts2", "l0_b200", 1, 3],
         "B200_PCIe-PyTorch-2": ["b100-ts2", "l0_b200", 2, 3],
         "B200_PCIe-PyTorch-3": ["b100-ts2", "l0_b200", 3, 3],
@@ -2624,9 +2631,10 @@ def launchTestJobs(pipeline, testFilter)
         // "DGX_H200-4_GPUs-TensorRT-Post-Merge-1": ["dgx-h200-x4", "l0_dgx_h200", 1, 3, 4],
         // "DGX_H200-4_GPUs-TensorRT-Post-Merge-2": ["dgx-h200-x4", "l0_dgx_h200", 2, 3, 4],
         // "DGX_H200-4_GPUs-TensorRT-Post-Merge-3": ["dgx-h200-x4", "l0_dgx_h200", 3, 3, 4],
-        "RTXPro6000-PyTorch-Post-Merge-1": ["rtx-pro-6000", "l0_rtx_pro_6000", 1, 1],
-        "RTXPro6000-4_GPUs-PyTorch-Post-Merge-1": ["rtx-pro-6000-x4", "l0_rtx_pro_6000", 1, 2, 4],
-        "RTXPro6000-4_GPUs-PyTorch-Post-Merge-2": ["rtx-pro-6000-x4", "l0_rtx_pro_6000", 2, 2, 4],
+        // Disable RTXPro6000 stages due to nodes will be offline temporarily
+        // "RTXPro6000-PyTorch-Post-Merge-1": ["rtx-pro-6000", "l0_rtx_pro_6000", 1, 1],
+        // "RTXPro6000-4_GPUs-PyTorch-Post-Merge-1": ["rtx-pro-6000-x4", "l0_rtx_pro_6000", 1, 2, 4],
+        // "RTXPro6000-4_GPUs-PyTorch-Post-Merge-2": ["rtx-pro-6000-x4", "l0_rtx_pro_6000", 2, 2, 4],
     ]
 
     parallelJobs = x86TestConfigs.collectEntries{key, values -> [key, [createKubernetesPodConfig(key.contains("-CU12-") ? LLM_DOCKER_IMAGE_12_9 : LLM_DOCKER_IMAGE, values[0], "amd64", values[4] ?: 1, key.contains("Perf")), {
@@ -2655,6 +2663,9 @@ def launchTestJobs(pipeline, testFilter)
         "DGX_B200-8_GPUs-PyTorch-1": ["b200-x8", "l0_dgx_b200", 1, 1, 8],
         "DGX_B200-4_GPUs-PyTorch-Post-Merge-1": ["b200-trtllm", "l0_dgx_b200", 1, 1, 4, 1, true],
         "DGX_B300-4_GPUs-PyTorch-Post-Merge-1": ["b300-x4", "l0_dgx_b300", 1, 1, 4],
+        // Perf sanity post merge test
+        "DGX_B200-4_GPUs-PyTorch-Perf-Sanity-Post-Merge-1": ["b200-x4", "perf_sanity_l0_dgx_b200", 1, 1, 4],
+        "DGX_B300-4_GPUs-PyTorch-Perf-Sanity-Post-Merge-1": ["b300-x4", "perf_sanity_l0_dgx_b300", 1, 1, 4],
     ]
     fullSet += x86SlurmTestConfigs.keySet()
 
@@ -2682,10 +2693,11 @@ def launchTestJobs(pipeline, testFilter)
     fullSet += SBSATestConfigs.keySet()
 
     SBSASlurmTestConfigs = [
-        "GB300-PyTorch-1": ["gb300-single", "l0_gb300", 1, 1],
+        // Disable GB300 stages due to nodes will be offline temporarily.
+        // "GB300-PyTorch-1": ["gb300-single", "l0_gb300", 1, 1],
         "GB200-4_GPUs-PyTorch-1": ["gb200-trtllm", "l0_gb200_multi_gpus", 1, 1, 4],
         "GB200-4_GPUs-PyTorch-Post-Merge-1": ["gb200-trtllm", "l0_gb200_multi_gpus", 1, 1, 4],
-        "GB300-4_GPUs-PyTorch-Post-Merge-1": ["gb300-trtllm", "l0_gb300_multi_gpus", 1, 1, 4],
+        // "GB300-4_GPUs-PyTorch-Post-Merge-1": ["gb300-trtllm", "l0_gb300_multi_gpus", 1, 1, 4],
     ]
     fullSet += SBSASlurmTestConfigs.keySet()
 
@@ -3235,6 +3247,8 @@ pipeline {
         // force datasets to be offline mode, to prevent CI jobs are downloading HF dataset causing test failures
         HF_DATASETS_OFFLINE=1
         CMAKE_POLICY_VERSION_MINIMUM="3.5"
+        OPEN_SEARCH_DB_BASE_URL=credentials("open_search_db_base_url")
+        OPEN_SEARCH_DB_CREDENTIALS=credentials("open_search_db_credentials")
     }
     stages {
         stage("Setup environment")

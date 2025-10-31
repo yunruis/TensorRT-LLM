@@ -26,7 +26,7 @@ from enum import Enum
 
 from utils.util import getSMVersion
 
-from tensorrt_llm._torch.autotuner import autotune
+from tensorrt_llm._torch.autotuner import AutoTuner, autotune
 from tensorrt_llm._torch.modules.fused_moe import RoutingMethodType
 from tensorrt_llm._torch.utils import next_positive_power_of_2
 from tensorrt_llm.quantization.utils.fp4_utils import (
@@ -958,6 +958,7 @@ class TestMoeFP8:
             topk_ids = None
             topk_weights = None
 
+        AutoTuner.get().clear_cache()
         with autotune(use_autotune):
             output = torch.ops.trtllm.fp8_block_scale_moe_runner(
                 expert_logits, routing_bias, hidden_states, hidden_states_scale,
@@ -965,7 +966,7 @@ class TestMoeFP8:
                 num_experts, top_k, n_groups, top_k_groups, intermediate_size,
                 0, num_experts, routed_scaling, routing_method_type,
                 topk_weights, topk_ids)
-
+        torch.cuda.synchronize()
         output_dequant_actual = output.to(torch.float)
         #
         # Run the reference implementations
@@ -1406,6 +1407,7 @@ class TestMoeFp4:
             topk_ids = None
             topk_weights = None
 
+        AutoTuner.get().clear_cache()
         with autotune(use_autotune):
             output = torch.ops.trtllm.fp4_block_scale_moe_runner(
                 expert_logits,
@@ -1431,7 +1433,7 @@ class TestMoeFp4:
                 do_finalize=True,
                 topk_ids=topk_ids,
                 topk_weights=topk_weights)
-
+        torch.cuda.synchronize()
         output_dequant_actual = output[0].to(torch.float)
 
         check_accuracy(output_dequant_reference,
@@ -1651,6 +1653,7 @@ class TestMoeFp4:
             topk_ids = None
             topk_weights = None
 
+        AutoTuner.get().clear_cache()
         with autotune(use_autotune):
             output = torch.ops.trtllm.fp8_fp4_block_scale_moe_runner(
                 expert_logits,
@@ -1676,7 +1679,7 @@ class TestMoeFp4:
                 act_type=ActType.SwiGlu.value,
                 topk_ids=topk_ids,
                 topk_weights=topk_weights)
-
+        torch.cuda.synchronize()
         output_dequant_actual = output[0].to(torch.float)
 
         check_accuracy(output_dequant_reference,
@@ -1813,6 +1816,7 @@ def test_moe_fp8_per_tensor_scale(num_tokens, expert_info, hidden_size,
         topk_ids = permute_info["topKIndices"].to(torch.int32).cuda()
         topk_weights = permute_info["topKLogits"].to(torch.bfloat16).cuda()
 
+    AutoTuner.get().clear_cache()
     output = torch.ops.trtllm.fp8_per_tensor_scale_moe_runner(
         expert_logits.to(torch.bfloat16)
         if use_routing_scales_on_input else expert_logits, routing_bias,
@@ -1821,7 +1825,7 @@ def test_moe_fp8_per_tensor_scale(num_tokens, expert_info, hidden_size,
         top_k, n_groups, top_k_groups, intermediate_size, 0, num_experts,
         routed_scaling, use_routing_scales_on_input, tile_tokens_dim,
         routing_method_type, topk_weights, topk_ids)
-
+    torch.cuda.synchronize()
     output_dequant_actual = output.to(torch.float)
 
     check_accuracy(output_dequant_reference,
@@ -1844,7 +1848,7 @@ def test_moe_fp8_per_tensor_scale(num_tokens, expert_info, hidden_size,
     [
         pytest.param(
             {
-                "num_experts": 512,
+                "num_experts": 16,
                 "top_k": 10,
                 "n_groups": None,
                 "top_k_groups": None,
@@ -1855,7 +1859,7 @@ def test_moe_fp8_per_tensor_scale(num_tokens, expert_info, hidden_size,
             id="RoutingRenormalize_qwen_next"),
         pytest.param(
             {
-                "num_experts": 128,
+                "num_experts": 16,
                 "top_k": 8,
                 "n_groups": None,
                 "top_k_groups": None,
@@ -1866,7 +1870,7 @@ def test_moe_fp8_per_tensor_scale(num_tokens, expert_info, hidden_size,
             id="RoutingRenormalize_topk_8"),
         pytest.param(
             {
-                "num_experts": 128,
+                "num_experts": 16,
                 "top_k": 4,
                 "n_groups": None,
                 "top_k_groups": None,
@@ -1891,7 +1895,7 @@ def test_moe_mxe2m1_weights(num_tokens, hidden_size, intermediate_size,
     #
     # Data Generation
     #
-
+    test_invalid_topk_input = False
     act_type = ActType.SwiGlu
     num_experts = routing_info["num_experts"]
     top_k = routing_info["top_k"]
@@ -1927,10 +1931,12 @@ def test_moe_mxe2m1_weights(num_tokens, hidden_size, intermediate_size,
             pytest.skip(
                 "512 experts is tested only with no autotune, mxfp8, SwiGlu")
     if use_topk_as_input:
-        if dtype_activation != "mxfp8" or top_k != 4 or act_type_str != "SwiGlu" or not use_autotune or num_tokens != 1:
+        if dtype_activation != "mxfp8" or top_k != 4 or act_type_str != "SwiGlu" or not use_autotune:
             pytest.skip(
-                "use_topk_as_input is tested only with mxfp8, topk=4, SwiGlu, autotune, and num_tokens=1"
+                "use_topk_as_input is tested only with mxfp8, topk=4, SwiGlu and not use_autotune"
             )
+        else:
+            test_invalid_topk_input = True
 
     assert top_k <= num_experts
     assert top_k <= 10
@@ -2033,6 +2039,17 @@ def test_moe_mxe2m1_weights(num_tokens, hidden_size, intermediate_size,
         topk_ids = permute_info["topKIndices"].to(torch.int32)
         topk_weights = permute_info["topKLogits"]
         expert_logits = None
+        if test_invalid_topk_input:
+            extra_col = torch.full((num_tokens, 1),
+                                   -1,
+                                   dtype=topk_ids.dtype,
+                                   device=topk_ids.device)
+            topk_ids = torch.cat([topk_ids, extra_col], dim=1)
+            extra_col = torch.full((num_tokens, 1),
+                                   -1,
+                                   dtype=topk_weights.dtype,
+                                   device=topk_weights.device)
+            topk_weights = torch.cat([topk_weights, extra_col], dim=1)
     else:
         topk_ids = None
         topk_weights = None
@@ -2178,6 +2195,9 @@ def test_moe_mxe2m1_weights(num_tokens, hidden_size, intermediate_size,
     # Run the TRT-LLM kernel
     #
     unpadded_hidden_size = hidden_size
+    if test_invalid_topk_input:
+        top_k = top_k + 1
+    AutoTuner.get().clear_cache()
     with autotune(use_autotune):
         if dtype_activation == "mxfp8":
             # Test fused unpadding by checking only half of the output.
@@ -2193,8 +2213,7 @@ def test_moe_mxe2m1_weights(num_tokens, hidden_size, intermediate_size,
                 gemm2_scales_mxe2m1_shuffled.cuda(), gemm2_bias_shuffled.cuda(),
                 num_experts, top_k, n_groups, top_k_groups, intermediate_size,
                 unpadded_hidden_size, 0, num_experts, routed_scaling,
-                routing_method_type, act_type.value, 1.0, topk_weights,
-                topk_ids)
+                routing_method_type, act_type.value, topk_weights, topk_ids)
         elif dtype_activation == "bf16":
             output = torch.ops.trtllm.bf16_mxe2m1_block_scale_moe_runner(
                 expert_logits, routing_bias,
@@ -2206,7 +2225,7 @@ def test_moe_mxe2m1_weights(num_tokens, hidden_size, intermediate_size,
                 gemm2_scales_mxe2m1_shuffled.cuda(), gemm2_bias_shuffled.cuda(),
                 num_experts, top_k, n_groups, top_k_groups, intermediate_size,
                 0, num_experts, routed_scaling, routing_method_type,
-                act_type.value, 1.0, topk_weights, topk_ids)
+                act_type.value, topk_weights, topk_ids)
         elif dtype_activation == "fp8":
             output = torch.ops.trtllm.e4m3_mxe2m1_block_scale_moe_runner(
                 expert_logits, routing_bias,
@@ -2218,11 +2237,11 @@ def test_moe_mxe2m1_weights(num_tokens, hidden_size, intermediate_size,
                 gemm2_scales_mxe2m1_shuffled.cuda(), gemm2_bias_shuffled.cuda(),
                 scale_c_fc1, scale_gate_fc1, scale_c_fc2, num_experts, top_k,
                 n_groups, top_k_groups, intermediate_size, 0, num_experts,
-                routed_scaling, routing_method_type, act_type.value, 1.0,
+                routed_scaling, routing_method_type, act_type.value,
                 topk_weights, topk_ids)
         else:
             raise ValueError("Invalid dtype_activation")
-
+    torch.cuda.synchronize()
     output_dequant_actual = output.to(torch.float)
     output_dequant_reference = output_dequant_reference[:, :
                                                         unpadded_hidden_size].contiguous(

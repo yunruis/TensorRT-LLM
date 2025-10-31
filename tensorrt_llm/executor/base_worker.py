@@ -19,7 +19,7 @@ from ..builder import ConfigEncoder, Engine, EngineConfig
 from ..llmapi.llm_args import BaseLlmArgs, PybindMirror
 from ..llmapi.tokenizer import TokenizerBase
 from ..llmapi.tracer import global_tracer
-from ..llmapi.utils import _SyncQueue, print_colored_debug
+from ..llmapi.utils import _SyncQueue, logger_debug
 from ..lora_manager import LoraManager
 from ..metrics import RequestEventTiming
 from ..prompt_adapter_manager import PromptAdapterManager
@@ -130,6 +130,7 @@ class BaseWorker(GenerationExecutor):
                 create_executor = create_autodeploy_executor
                 assert isinstance(self.llm_args, ADLlmArgs)
                 args["ad_config"] = self.llm_args.get_pytorch_backend_config()
+                args["tokenizer"] = self._tokenizer
             else:
                 raise ValueError(
                     f"Unsupported backend config: {self.llm_args.backend}")
@@ -626,16 +627,15 @@ class AwaitResponseHelper:
         if self.handler_kind is HandlerKind.unknown:
             if not (self.worker.result_queue is not None
                     or self.worker.postproc_queues is not None):
-                print_colored_debug(
-                    f"creating await_response helper for Worker\n",
-                    color="yellow")
+                logger_debug(f"creating await_response helper for Worker\n",
+                             color="yellow")
                 # When ExecutorBindingWorker is used in the main process
                 # aka the single process mode
                 self.handler_kind = HandlerKind.single_process_worker
             elif self.worker.result_queue is not None or self.worker.postproc_queues is not None:
                 # The ExecutorBindingProxy is used
-                print_colored_debug(f"creating await_response helper for IPC\n",
-                                    color="yellow")
+                logger_debug(f"creating await_response helper for IPC\n",
+                             color="yellow")
                 self.handler_kind = HandlerKind.ipc_batched
             else:
                 raise NotImplementedError
@@ -887,7 +887,15 @@ def _get_metrics_dict(
                 req_perf_metrics.timing_metrics.first_scheduled_time.
                 total_seconds(),
                 RequestEventTiming.LAST_TOKEN_TIME:
-                req_perf_metrics.timing_metrics.last_token_time.total_seconds()
+                req_perf_metrics.timing_metrics.last_token_time.total_seconds(),
+                RequestEventTiming.KV_CACHE_TRANSFER_START:
+                req_perf_metrics.timing_metrics.kv_cache_transfer_start.
+                total_seconds(),
+                RequestEventTiming.KV_CACHE_TRANSFER_END:
+                req_perf_metrics.timing_metrics.kv_cache_transfer_end.
+                total_seconds(),
+                RequestEventTiming.KV_CACHE_SIZE:
+                req_perf_metrics.timing_metrics.kv_cache_size,
             }
     return metrics_dict
 

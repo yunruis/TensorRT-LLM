@@ -626,9 +626,23 @@ def deepseek_v3_model_root(request):
     elif request.param == "DeepSeek-V3-Lite-nvfp4_moe_only":
         deepseek_v3_model_root = os.path.join(models_root, "DeepSeek-V3-Lite",
                                               "nvfp4_moe_only")
+    elif request.param == "DeepSeek-V3.2-Exp":
+        deepseek_v3_model_root = os.path.join(models_root,
+                                              "DeepSeek-V3.2-Exp-hf")
     assert exists(
         deepseek_v3_model_root), f"{deepseek_v3_model_root} does not exist!"
     return deepseek_v3_model_root
+
+
+@pytest.fixture(scope="function")
+def deepseek_r1_model_root(request):
+    models_root = llm_models_root()
+    if request.param == "DeepSeek-R1-0528-FP4-v2":
+        deepseek_r1_model_root = os.path.join(models_root, "DeepSeek-R1",
+                                              "DeepSeek-R1-0528-FP4-v2")
+    assert exists(
+        deepseek_r1_model_root), f"{deepseek_r1_model_root} does not exist!"
+    return deepseek_r1_model_root
 
 
 @pytest.fixture(scope="session")
@@ -2231,6 +2245,10 @@ def pytest_configure(config):
     if periodic and output_dir:
         periodic_interval = config.getoption("--periodic-interval")
         periodic_batch_size = config.getoption("--periodic-batch-size")
+
+        # Create output directory early (like --junitxml does) to avoid conflicts with other plugins
+        # that may need to write to the same directory (e.g., pytest-split)
+        os.makedirs(output_dir, exist_ok=True)
 
         # Create the reporter with logger
         xmlpath = os.path.join(output_dir, "results.xml")
