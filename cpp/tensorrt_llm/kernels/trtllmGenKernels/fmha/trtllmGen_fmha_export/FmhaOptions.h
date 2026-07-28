@@ -46,10 +46,14 @@ struct FmhaOptions : public KernelConfigBase {
   int mChunkedAttentionSize{0};
   // Dry-run: print a log but does not actually generate anything
   bool mDryRun{false};
+  // Exact token dimension of the shared DSv4 FP8 output tensor.
+  int32_t mDsv4OutputBufM{0};
   // Token dimension reserved by the DSv4 FP32 scale tensor. This host-side value may be padded.
   int32_t mDsv4ScaleBufM{0};
   // Enable the auto tuner.
   bool mEnablesAutoTuner{false};
+  // Select the grouped MLA generation kernel in the auto tuner.
+  bool mSelectsGroupedMla{false};
   // Enable the BF16Q+FP8KV K-only transform path. Disabled by default.
   bool mEnablesBf16QFp8KvKOnlyTransform{false};
   // Whether is exporting cubin.
@@ -131,8 +135,10 @@ struct FmhaOptions : public KernelConfigBase {
     TO_JSON(mChecksResults);
     TO_JSON(mChunkedAttentionSize);
     TO_JSON(mDryRun);
+    TO_JSON(mDsv4OutputBufM);
     TO_JSON(mDsv4ScaleBufM);
     TO_JSON(mEnablesAutoTuner);
+    TO_JSON(mSelectsGroupedMla);
     TO_JSON(mEnablesBf16QFp8KvKOnlyTransform);
     TO_JSON(mIsExportingCubin);
     TO_JSON(mIsTracing);
@@ -529,12 +535,13 @@ inline void checkFmhaOptions(FmhaOptions const& options,
     }
   }
 
-  // The mGroupsTokensHeadsQ only works with GQA generation kernels.
+  // groupsTokensHeadsQ is allowed for GQA gen and explicitly selected MLA gen kernels.
   if (options.mGroupsTokensHeadsQ) {
     TLLM_CHECK_ERROR(!isContextKernel(options.mFmhaKernelType),
                      "mGroupsTokensHeadsQ should only be enabled for generation kernels.");
-    TLLM_CHECK_ERROR(!options.mIsMlaGen,
-                     "MLA gen kernels haven't supported mGroupsTokensHeadsQ yet.");
+    TLLM_CHECK_ERROR(!options.mIsMlaGen
+                       || options.mSelectsGroupedMla,
+                     "MLA generation with mGroupsTokensHeadsQ requires mSelectsGroupedMla.");
   }
 
 
@@ -654,14 +661,20 @@ inline void updateDsv4InvRopeFp8QuantOptions(FmhaOptions& options) {
   TLLM_CHECK_ERROR(options.mNumHeadsQ % kDsv4HeadsPerGroup == 0,
                    "numHeadsQ must be divisible by the DSv4 packed output head group size.");
 
+  if (options.mDsv4OutputBufM == 0) {
+    options.mDsv4OutputBufM = options.mSumOfSeqLensQ;
+  }
+  TLLM_CHECK_ERROR(options.mDsv4OutputBufM >= options.mSumOfSeqLensQ,
+                   "Dsv4OutputBufM must cover all local Q tokens.");
+
+  int32_t constexpr scaleTokenAlignment = 4;
+  int32_t const paddedScaleBufM =
+    (options.mDsv4OutputBufM + scaleTokenAlignment - 1) / scaleTokenAlignment * scaleTokenAlignment;
   if (options.mDsv4ScaleBufM == 0) {
-    int32_t constexpr scaleTokenAlignment = 4;
-    int32_t const numPackedTokens = options.mSumOfSeqLensQ;
-    int32_t const paddedScaleBufM =
-      (numPackedTokens + scaleTokenAlignment - 1) / scaleTokenAlignment * scaleTokenAlignment;
     options.mDsv4ScaleBufM = paddedScaleBufM;
   }
-  TLLM_CHECK_ERROR(options.mDsv4ScaleBufM > 0, "Dsv4ScaleBufM must be initialized.");
+  TLLM_CHECK_ERROR(options.mDsv4ScaleBufM == paddedScaleBufM,
+                   "Dsv4ScaleBufM must be pad_up(Dsv4OutputBufM, 4).");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

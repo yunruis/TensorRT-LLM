@@ -226,6 +226,7 @@ void FmhaDispatcher::run(MHARunnerParams runnerParams)
         {
             tllmRunnerParams.mDsv4EpilogueFusion.enabled = true;
             tllmRunnerParams.mDsv4EpilogueFusion.cosSinCache = runnerParams.dsv4EpilogueFusion.cosSinCache;
+            tllmRunnerParams.mDsv4EpilogueFusion.outputBufM = runnerParams.dsv4EpilogueFusion.outputBufM;
             tllmRunnerParams.mDsv4EpilogueFusion.scaleBufM = runnerParams.dsv4EpilogueFusion.scaleBufM;
         }
         // The sequence lengths for K/V.

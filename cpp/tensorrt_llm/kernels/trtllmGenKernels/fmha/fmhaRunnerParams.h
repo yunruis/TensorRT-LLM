@@ -230,6 +230,8 @@ struct TllmGenFmhaRunnerParams
         bool enabled{false};
         // The cos/sin cache used by the fused inverse-RoPE epilogue.
         float const* cosSinCache{nullptr};
+        // The exact token dimension of the shared FP8 output tensor.
+        int32_t outputBufM{0};
         // The physical token stride of the FP32 output scale tensor.
         int32_t scaleBufM{0};
     };
@@ -349,8 +351,8 @@ struct TllmGenFmhaRunnerParams
     int mMultiProcessorCount;
     // Scaling factor for Q.
     float mScaleQ;
-    // The start token index in SF tensor. Used for FP4 SF offset calculation in generation phase kernel when inflight
-    // batching is enabled.
+    // The start token index in the output token dimension. Used for FP4 SF and DSv4 fused FP8/SF output offset
+    // calculation in generation phase kernels when inflight batching is enabled.
     int mSfStartTokenIdx;
     // Skip softmax threshold scale factor.
     float mSkipSoftmaxThresholdScaleFactor;

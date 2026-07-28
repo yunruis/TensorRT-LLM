@@ -1134,6 +1134,7 @@ int AttentionOp::mlaGeneration(
         {
             tllmRunnerParams.mDsv4EpilogueFusion.enabled = true;
             tllmRunnerParams.mDsv4EpilogueFusion.cosSinCache = params.dsv4_epilogue_fusion.cos_sin_cache;
+            tllmRunnerParams.mDsv4EpilogueFusion.outputBufM = params.dsv4_epilogue_fusion.output_buf_m;
             tllmRunnerParams.mDsv4EpilogueFusion.scaleBufM = params.dsv4_epilogue_fusion.scale_buf_m;
         }
 
@@ -2028,6 +2029,7 @@ int AttentionOp::enqueueContext(EnqueueContextParams<T> const& params, cudaStrea
         {
             fmhaParams.dsv4EpilogueFusion.enabled = true;
             fmhaParams.dsv4EpilogueFusion.cosSinCache = params.mla_param->dsv4_epilogue_fusion.cos_sin_cache;
+            fmhaParams.dsv4EpilogueFusion.outputBufM = params.mla_param->dsv4_epilogue_fusion.output_buf_m;
             fmhaParams.dsv4EpilogueFusion.scaleBufM = params.mla_param->dsv4_epilogue_fusion.scale_buf_m;
         }
         fmhaParams.attentionSinksPtr = params.attention_sinks;

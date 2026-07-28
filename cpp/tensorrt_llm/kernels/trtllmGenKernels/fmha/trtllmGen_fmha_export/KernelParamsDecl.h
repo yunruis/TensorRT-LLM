@@ -119,6 +119,8 @@ struct KernelParams {
   int32_t mBatchSize;
   // The chunked attention size in log2.
   int32_t mChunkedAttentionSizeLog2;
+  // Exact token dimension of the shared DSv4 FP8 output tensor.
+  int64_t mDsv4OutputBufM;
   // Padded token dimension for the DSv4 fused FP32 scale layout.
   int64_t mDsv4ScaleBufM;
   // The factor to add to the maximum value to increase the probability
@@ -170,8 +172,8 @@ struct KernelParams {
   float mSkipSoftmaxThresholdScaleFactor;
   // The sparse attention topK value.
   int32_t mSparseAttnTopK;
-  // The start token index in the output SF tensor. Used for block-scaled output SF offset
-  // calculation in generation phase kernels when inflight batching is enabled in TRT-LLM.
+  // The start token index in the output token dimension. Used for block-scaled SF output and DSv4
+  // fused FP8/SF output in generation when inflight batching is enabled in TRT-LLM.
   int32_t mStartTokenIdxSfO;
   // The sum of sequence lengths for Q and K/V.
   int32_t mSumOfSeqLensQ, mSumOfSeqLensKv;

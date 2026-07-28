@@ -59,8 +59,8 @@ struct FmhaData {
     // attention.
     int32_t const* seqLensKvD;
 
-    // Start token index in the O scaling-factor tensor. Used for FP4 SF offset in generation when
-    // inflight batching is enabled (TRT-LLM). Context uses 0.
+    // Start token index in the output token dimension. Used for FP4 SF output and DSv4 fused FP8/SF
+    // output in generation when inflight batching is enabled (TRT-LLM). Context uses 0.
     int32_t startTokenIdxSfO{0};
 
     // The variable sparseMla topK lengths with shape of [numTokensQ]

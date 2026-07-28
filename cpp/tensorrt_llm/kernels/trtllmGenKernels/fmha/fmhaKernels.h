@@ -1013,6 +1013,7 @@ private:
         {
             options.mFusesDsv4InvRopeFp8Quant = true;
             options.mDtypeOut = tg::Dtype::E4m3;
+            options.mDsv4OutputBufM = params.mDsv4EpilogueFusion.outputBufM;
             options.mDsv4ScaleBufM = params.mDsv4EpilogueFusion.scaleBufM;
         }
 

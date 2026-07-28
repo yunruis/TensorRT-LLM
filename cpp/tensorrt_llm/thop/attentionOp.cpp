@@ -453,10 +453,13 @@ public:
         std::optional<torch::Tensor> dsv4_inv_rope_cos_sin_cache, bool enable_dsv4_epilogue_fusion) const override
     {
         auto stream = at::cuda::getCurrentCUDAStream(qkv_or_q.get_device());
-        T* attention_input = static_cast<T*>(qkv_or_q.slice(0, token_offset).data_ptr());
+        int32_t const inputTokenOffset = enable_dsv4_epilogue_fusion ? 0 : token_offset;
+        T* attention_input = static_cast<T*>(qkv_or_q.slice(0, inputTokenOffset).data_ptr());
         T* k_ptr = nullptr;
         T* v_ptr = nullptr;
-        AttentionOutT* context_buf = static_cast<AttentionOutT*>(output.slice(0, token_offset).data_ptr());
+        AttentionOutT* context_buf = enable_dsv4_epilogue_fusion
+            ? static_cast<AttentionOutT*>(output.data_ptr())
+            : static_cast<AttentionOutT*>(output.slice(0, token_offset).data_ptr());
         TORCH_CHECK(!op.mFuseFp4Quant || output_sf.has_value());
         TORCH_CHECK(!enable_dsv4_epilogue_fusion || output_sf.has_value());
         void* context_buf_sf = (op.mFuseFp4Quant || enable_dsv4_epilogue_fusion) ? output_sf->data_ptr() : nullptr;
@@ -536,8 +539,8 @@ public:
                 TORCH_CHECK(k->strides()[1] == 1);
                 TORCH_CHECK(v->strides()[1] == 1);
 
-                k_ptr = static_cast<T*>(k->slice(0, token_offset).data_ptr());
-                v_ptr = static_cast<T*>(v->slice(0, token_offset).data_ptr());
+                k_ptr = static_cast<T*>(k->slice(0, inputTokenOffset).data_ptr());
+                v_ptr = static_cast<T*>(v->slice(0, inputTokenOffset).data_ptr());
                 mla_params.k_buf = k_ptr;
                 mla_params.v_buf = v_ptr;
 
@@ -605,14 +608,21 @@ public:
                     "DSv4 fused epilogue output_sf must be float32.");
                 TORCH_CHECK(output_sf_tensor.dim() == 3 && output_sf_tensor.is_contiguous(),
                     "DSv4 fused epilogue output_sf must be contiguous [groups, K/128, padded_tokens].");
-                TORCH_CHECK(output.size(1) >= num_tokens, "DSv4 fused epilogue output token dimension is too small.");
+                int64_t constexpr kDsv4ScaleTokenAlignment = 4;
+                int64_t const outputBufM = output.size(1);
+                int64_t const expectedScaleBufM
+                    = (outputBufM + kDsv4ScaleTokenAlignment - 1) / kDsv4ScaleTokenAlignment * kDsv4ScaleTokenAlignment;
+                TORCH_CHECK(outputBufM > 0, "DSv4 fused epilogue output token dimension must be positive.");
+                TORCH_CHECK(token_offset >= 0 && static_cast<int64_t>(token_offset) + num_tokens <= outputBufM,
+                    "DSv4 fused epilogue output does not cover the current token range.");
                 TORCH_CHECK(op.mMLAParams.v_head_dim > 0 && op.mMLAParams.v_head_dim % 128 == 0,
                     "DSv4 fused epilogue requires v_head_dim to be a positive multiple of 128.");
-                TORCH_CHECK(output_sf_tensor.size(2) >= num_tokens,
-                    "DSv4 fused epilogue output_sf token dimension is too small.");
+                TORCH_CHECK(output_sf_tensor.size(2) == expectedScaleBufM,
+                    "DSv4 fused epilogue output_sf token dimension must be pad_up(output tokens, 4).");
 
                 mla_params.dsv4_epilogue_fusion.enabled = true;
                 mla_params.dsv4_epilogue_fusion.cos_sin_cache = static_cast<float const*>(cos_sin_cache.data_ptr());
+                mla_params.dsv4_epilogue_fusion.output_buf_m = static_cast<int32_t>(outputBufM);
                 mla_params.dsv4_epilogue_fusion.scale_buf_m = static_cast<int32_t>(output_sf_tensor.size(2));
             }
             mla_params.batch_size = num_seqs;
@@ -1327,6 +1337,8 @@ void attention(torch::Tensor q, std::optional<torch::Tensor> k, std::optional<to
     {
         attn_input_type = static_cast<AttentionInputType>(attention_input_type.value());
     }
+    TORCH_CHECK(!enable_dsv4_epilogue_fusion || attn_input_type != AttentionInputType::Mixed,
+        "DSv4 fused epilogue requires split context-only or generation-only attention input.");
     bool const is_gen_only = attn_input_type == AttentionInputType::GenerationOnly;
 
     int32_t const num_generations = num_seqs - static_cast<int32_t>(num_contexts);
@@ -1391,7 +1403,7 @@ void attention(torch::Tensor q, std::optional<torch::Tensor> k, std::optional<to
     {
 
         auto seq_offset = num_contexts;
-        auto token_offset = is_gen_only ? 0 : num_ctx_tokens;
+        auto token_offset = (is_gen_only && !enable_dsv4_epilogue_fusion) ? 0 : num_ctx_tokens;
         runner->run(*op,
             /*is_context=*/false, seq_offset,
             /*num_seqs=*/num_generations, token_offset,

@@ -891,6 +891,7 @@ static KernelParams setKernelParams(FmhaOptions_ const& options,
   params.mNumHiddenEltsO = options.mNumHeadsQ * options.mHeadDimV;
   params.mNumTokensPerCtaQ = numTokensPerCtaQ;
   params.mOutputScale = options.mOutputScale;
+  params.mDsv4OutputBufM = options.mDsv4OutputBufM;
   params.mDsv4ScaleBufM = options.mDsv4ScaleBufM;
   params.mScaleSoftmaxLog2 = softmaxScale;
   params.mScaleSfKv = kvSfScale;

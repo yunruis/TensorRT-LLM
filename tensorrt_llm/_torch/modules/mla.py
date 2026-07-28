@@ -1049,10 +1049,6 @@ class MLA(nn.Module):
             return False
         if num_contexts == 0 and num_generations == 0:
             return False
-        if num_contexts > 0 and num_generations > 0:
-            # Context and generation use separate FMHA calls, but the fused
-            # buffers do not carry token offsets for a mixed batch.
-            return False
         if self.mapping.has_cp_helix():
             return False
         if not is_sm_100f():
@@ -1565,10 +1561,6 @@ class MLA(nn.Module):
         num_ctx_tokens = attn_metadata.num_ctx_tokens
         num_tokens = attn_metadata.num_tokens
         enable_dsv4_epilogue_fusion = dsv4_epilogue_output is not None
-        if enable_dsv4_epilogue_fusion and ((num_contexts > 0) == (num_generations > 0)):
-            raise RuntimeError(
-                "DSv4 epilogue fusion requires a context-only or generation-only batch."
-            )
 
         hidden_states = hidden_states[:num_tokens, ...]
         if position_ids is not None:
@@ -2464,7 +2456,7 @@ class MLA(nn.Module):
             assert self.is_deepseek_v4
             assert dsv4_epilogue_output is not None
             dsv4_output, dsv4_output_sf = self._validate_dsv4_epilogue_buffers(
-                num_tokens, dsv4_epilogue_output
+                attn_metadata.num_tokens, dsv4_epilogue_output
             )
             dsv4_cos_sin_cache = self.inverse_rotary_emb.rotary_cos_sin
 
@@ -2623,7 +2615,7 @@ class MLA(nn.Module):
         )
 
         if use_fused_q_fp8:
-            # Defensive prefix slicing: context-only batches today, mixed-batch later.
+            # Context uses the prefix of the mixed-batch projection buffers.
             q_pe = fused_q_pe[:num_tokens]
             quant_q_buffer = quant_q_buffer[:num_tokens].view(
                 num_tokens,
@@ -2641,7 +2633,7 @@ class MLA(nn.Module):
             assert self.is_deepseek_v4
             assert dsv4_epilogue_output is not None
             dsv4_output, dsv4_output_sf = self._validate_dsv4_epilogue_buffers(
-                num_tokens, dsv4_epilogue_output
+                attn_metadata.num_tokens, dsv4_epilogue_output
             )
             dsv4_cos_sin_cache = self.inverse_rotary_emb.rotary_cos_sin
 

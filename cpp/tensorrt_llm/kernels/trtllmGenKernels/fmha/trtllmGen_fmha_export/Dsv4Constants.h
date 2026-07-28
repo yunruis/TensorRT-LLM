@@ -31,7 +31,7 @@ namespace fmha {
 //   logical O: [sumOfSeqLensQ,  numHeadsQ,  headDimV]
 //
 // Fused epilogue outputs:
-//   FP8 O:     [numHeadsQ / headsPerGroup, sumOfSeqLensQ, headsPerGroup, headDimV]
+//   FP8 O:     [numHeadsQ / headsPerGroup, outputBufM, headsPerGroup, headDimV]
 //   FP32 scale: [numHeadsQ / headsPerGroup,
 //               headsPerGroup * headDimV / quantGroupSize,
 //               scaleBufM]
@@ -47,6 +47,7 @@ namespace fmha {
 //   headDimPerCtaV is the V/O head-dimension slice per CTA; clusterDimX=2 covers headDimV.
 //   headsPerGroup is FP8 O dim2 and the head-in-group factor in FP32 scale dim1.
 //   quantGroupSize is the 128-column headDimV block; FP32 scale has one value per block.
+//   outputBufM is FP8 O dim1, the exact physical token stride between output head groups.
 //   scaleBufM is FP32 scale dim2, the physical token stride for the scale tensor.
 //   ropeStart/ropeHalf cover headDimV[448:512); ropeOffsetInBlock is the offset inside that block.
 

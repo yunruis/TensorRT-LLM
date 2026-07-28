@@ -301,6 +301,8 @@ struct MHARunnerParams
         bool enabled = false;
         // The cos/sin cache used by the fused inverse-RoPE epilogue.
         float const* cosSinCache = nullptr;
+        // The exact token dimension of the shared FP8 output tensor.
+        int32_t outputBufM = 0;
         // The physical token stride of the FP32 output scale tensor.
         int32_t scaleBufM = 0;
     };
