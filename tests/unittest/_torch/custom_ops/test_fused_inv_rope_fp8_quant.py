@@ -40,6 +40,75 @@ def _ref_path(
     return fp8_ref, scale_ref
 
 
+def _pad_up(x, alignment):
+    return (x + alignment - 1) // alignment * alignment
+
+
+def _apply_inverse_rope_torch(o_bf16, position_ids, rotary_cos_sin, nope_dim, rope_dim, is_neox):
+    o = o_bf16.clone().contiguous()
+    rope = o[:, :, nope_dim : nope_dim + rope_dim].float()
+    half_rope = rope_dim // 2
+    cos = rotary_cos_sin[position_ids.long(), 0].view(-1, 1, half_rope)
+    sin = rotary_cos_sin[position_ids.long(), 1].view(-1, 1, half_rope)
+
+    if is_neox:
+        x1 = rope[:, :, :half_rope]
+        x2 = rope[:, :, half_rope:]
+        rotated = torch.cat((x1 * cos + x2 * sin, x2 * cos - x1 * sin), dim=-1)
+    else:
+        x_even = rope[:, :, 0::2]
+        x_odd = rope[:, :, 1::2]
+        rotated = torch.empty_like(rope)
+        rotated[:, :, 0::2] = x_even * cos + x_odd * sin
+        rotated[:, :, 1::2] = x_odd * cos - x_even * sin
+
+    # The legacy reference path writes RoPE results back to BF16 before the
+    # standalone FP8 quantize kernel reads them.
+    o[:, :, nope_dim : nope_dim + rope_dim] = rotated.to(o.dtype)
+    return o
+
+
+def _fp8_batched_quantize_1x128_permute102_torch(grouped_bf16):
+    num_tokens, n_groups, d = grouped_bf16.shape
+    quant_group_size = 128
+    assert d % quant_group_size == 0
+
+    x = grouped_bf16.permute(
+        1, 0, 2
+    ).contiguous()  # [n_groups, num_tokens, heads_per_group * head_dim]
+    x_blocks = x.float().view(n_groups, num_tokens, d // quant_group_size, quant_group_size)
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    absmax = x_blocks.abs().amax(dim=-1).clamp_min(1e-12)
+    scale = absmax / fp8_max
+    fp8 = (x_blocks / scale.unsqueeze(-1)).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn)
+    fp8 = fp8.reshape(n_groups, num_tokens, d)
+
+    scale_m = _pad_up(num_tokens, 4)
+    scale_out = torch.zeros(
+        (n_groups, d // quant_group_size, scale_m),
+        dtype=torch.float32,
+        device=grouped_bf16.device,
+    )
+    scale_out[:, :, :num_tokens] = scale.permute(0, 2, 1)
+    return fp8, scale_out
+
+
+def _torch_ref_path(o_bf16, position_ids, rotary_cos_sin, n_groups, nope_dim, rope_dim, is_neox):
+    # o_bf16: [num_tokens, num_heads, head_dim]
+    # position_ids: [num_tokens]
+    # rotary_cos_sin: [max_positions, 2, 32]
+    # n_groups: int
+    # nope_dim: int
+    # rope_dim: int
+    # is_neox: bool
+    """Pure PyTorch version of inverse RoPE -> fp8_batched_quantize_1x128_permute102."""
+    o = _apply_inverse_rope_torch(
+        o_bf16, position_ids.view(-1), rotary_cos_sin, nope_dim, rope_dim, is_neox
+    )
+    grouped = o.view(o.shape[0], n_groups, -1)  # [num_tokens, n_groups, heads_per_group * head_dim]
+    return _fp8_batched_quantize_1x128_permute102_torch(grouped)
+
+
 def _fused_path(
     o_bf16, position_ids, rotary_cos_sin, n_groups, heads_per_group, nope_dim, rope_dim, is_neox
 ):
@@ -115,8 +184,11 @@ def _check_match(fp8_ref, scale_ref, fp8_fused, scale_fused, *, ctx):
 @pytest.mark.parametrize("is_neox", [True, False], ids=["neox", "gptj"])
 @pytest.mark.parametrize("num_tokens", [1, 3, 8, 64, 257, 1024, 4096, 8192])
 def test_fused_inv_rope_fp8_quant(num_tokens, shape, is_neox):
-    """Fused op (CUDA) vs the legacy 2-kernel reference. Covers both rope
-    layouts and all production DSv4 shape combinations within 1 FP8 ULP."""
+    """Pure PyTorch and fused CUDA paths vs the legacy 2-kernel reference.
+
+    Covers both rope layouts and all production DSv4 shape combinations within
+    1 FP8 ULP.
+    """
     torch.manual_seed(0)
     device = "cuda"
     n_groups = shape["n_groups"]
@@ -145,6 +217,23 @@ def test_fused_inv_rope_fp8_quant(num_tokens, shape, is_neox):
         rope_dim,
         is_neox=is_neox,
     )
+    fp8_torch, scale_torch = _torch_ref_path(
+        o_bf16,
+        position_ids,
+        rotary_cos_sin,
+        n_groups,
+        nope_dim,
+        rope_dim,
+        is_neox=is_neox,
+    )
+    _check_match(
+        fp8_ref,
+        scale_ref,
+        fp8_torch,
+        scale_torch,
+        ctx=f"torch_ref M={num_tokens} is_neox={is_neox} {shape}",
+    )
+
     fp8_fused, scale_fused = _fused_path(
         o_bf16,
         position_ids,
